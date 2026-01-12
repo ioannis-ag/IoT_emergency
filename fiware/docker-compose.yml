@@ -1,0 +1,43 @@
+version: "3.8"
+
+services:
+  mongodb:
+    image: mongo:5.0
+    container_name: fiware-mongo
+    restart: unless-stopped
+    ports:
+      - "27017:27017"
+    command: ["mongod", "--bind_ip_all"]
+    volumes:
+      - mongo-data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.runCommand({ ping: 1 }).ok"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  orion:
+    image: fiware/orion:3.9.0
+    container_name: fiware-orion
+    restart: unless-stopped
+    depends_on:
+      mongodb:
+        condition: service_healthy
+    ports:
+      - "1026:1026"
+    command: >
+      -dbhost mongodb
+      -logLevel INFO
+      -corsOrigin __ALL
+      -reqPoolSize 10
+      -subCacheIval 60
+      -notificationMode threadpool:50
+      -disableFileLog
+    healthcheck:
+      test: ["CMD", "sh", "-c", "wget -qO- http://localhost:1026/version >/dev/null 2>&1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  mongo-data:

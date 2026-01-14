@@ -1,4 +1,4 @@
 This folder contains various code versions that were uploaded on the esp32 in the central demo sensor box.
-The role of the ESP32 in the system is to forward data from the sensor box but also from polar h10, towards the mqtt broker.
-This is a short guide that describes the role of each version and what it offers towards the development of the final code the esp32.
+The role of the ESP32 in the system is to forward data from the sensor box and polar h10, towards the mqtt broker.
+This is a short guide that describes the role of each version and what it offers towards the development of the final esp32 code.
 

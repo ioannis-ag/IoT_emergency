@@ -7,3 +7,7 @@ to the internet (and the MQTT server). ESP_A "asks" its neighbor ESP_B, if it ha
 to ESP_B. The data being handled in this version is fake bmp (heart rate) data. The ESPs communicate through ESP-NOW. VERSION1-FAILOVER.png shows the data
 received by the mqtt broker.
 
+Version 2: This version updates the code of ESP_A, to gather real Polar H10 data through BLE (bmp or heart rate) and forward them to the mqtt, 
+but also simulate a loss of connection, in the duration of which data gets forwarded to the mqtt broker through ESP_B, after connection is established (ESP-NOW).
+
+

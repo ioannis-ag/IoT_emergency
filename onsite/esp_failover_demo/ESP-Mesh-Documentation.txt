@@ -1,0 +1,1 @@
+One important feature of our project is maintaining a level of redundancy at all times. We think its critical to avoid single points of failure, especially when it comes to transmitting biomedical data, used to evaluate health status. 

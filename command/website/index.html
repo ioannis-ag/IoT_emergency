@@ -1,0 +1,179 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Smart Firefighter – Location Dashboard</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+
+  <style>
+    body {
+      margin: 0;
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: #f8fafc; /* light gray */
+      color: #1e293b;      /* dark blue-gray text */
+    }
+
+    header {
+      background: #ffffff;
+      padding: 16px 24px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      border-bottom: 1px solid #e2e8f0;
+      position: sticky;
+      top: 0;
+      z-index: 10;
+    }
+
+    header h1 {
+      margin: 0;
+      font-size: 20px;
+      font-weight: 600;
+    }
+
+    header span {
+      font-size: 12px;
+      color: #64748b;
+    }
+
+    main {
+      padding: 24px;
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(360px, 1fr));
+      gap: 20px;
+    }
+
+    .card {
+      background: #ffffff;
+      border-radius: 12px;
+      padding: 16px;
+      border: 1px solid #e2e8f0;
+      box-shadow: 0 2px 6px rgba(0,0,0,0.05);
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+
+    .card h2 {
+      margin: 0;
+      font-size: 16px;
+      font-weight: 600;
+      color: #0f172a;
+    }
+
+    .card p {
+      margin: 0;
+      font-size: 13px;
+      color: #475569;
+    }
+
+    .panel-wrapper {
+      margin-top: 8px;
+      border-radius: 10px;
+      overflow: hidden;
+      border: 1px solid #cbd5e1;
+      background: #ffffff;
+      height: 260px;
+    }
+
+    .panel-frame {
+      border: none;
+      width: 100%;
+      height: 100%;
+    }
+
+    footer {
+      text-align: center;
+      font-size: 12px;
+      color: #94a3b8;
+      padding: 10px 0 20px;
+    }
+  </style>
+</head>
+
+<body>
+  <header>
+    <h1>Smart Firefighter – Location Overview</h1>
+    <span>Prototype · Grafana embedded</span>
+  </header>
+
+  <main>
+    <!-- Panel 5 -->
+    <section class="card">
+      <h2>Location View – Panel 5</h2>
+      <p>Latest map / view from panel-5.</p>
+      <div class="panel-wrapper">
+        <iframe
+          class="panel-frame"
+          src="http://192.168.2.12:8087/d-solo/adqbgcm/location?orgId=1&from=now-5m&to=now&refresh=5s&panelId=panel-5&theme=light">
+        </iframe>
+      </div>
+    </section>
+
+    <!-- Panel 4 -->
+    <section class="card">
+      <h2>Location View – Panel 4</h2>
+      <p>Alternative layer / zoom (panel-4).</p>
+      <div class="panel-wrapper">
+        <iframe
+          class="panel-frame"
+          src="http://192.168.2.12:8087/d-solo/adqbgcm/location?orgId=1&from=now-5m&to=now&refresh=5s&panelId=panel-4&theme=light">
+        </iframe>
+      </div>
+    </section>
+
+    <!-- Panel 3 -->
+    <section class="card">
+      <h2>Location View – Panel 3</h2>
+      <p>Main geomap / recent positions.</p>
+      <div class="panel-wrapper">
+        <iframe
+          class="panel-frame"
+          src="http://192.168.2.12:8087/d-solo/adqbgcm/location?orgId=1&from=now-5m&to=now&refresh=5s&panelId=panel-3&theme=light">
+        </iframe>
+      </div>
+    </section>
+
+    <!-- Panel 2 -->
+    <section class="card">
+      <h2>Location View – Panel 2</h2>
+      <p>Secondary view / tracking.</p>
+      <div class="panel-wrapper">
+        <iframe
+          class="panel-frame"
+          src="http://192.168.2.12:8087/d-solo/adqbgcm/location?orgId=1&from=now-5m&to=now&refresh=5s&panelId=panel-2&theme=light">
+        </iframe>
+      </div>
+    </section>
+
+    <!-- Panel 1 -->
+    <section class="card">
+      <h2>Location View – Panel 1</h2>
+      <p>Extra metrics / helper panel.</p>
+      <div class="panel-wrapper">
+        <iframe
+          class="panel-frame"
+          src="http://192.168.2.12:8087/d-solo/adqbgcm/location?orgId=1&from=now-5m&to=now&refresh=5s&panelId=panel-1&theme=light">
+        </iframe>
+      </div>
+    </section>
+
+    <!-- Live Camera -->
+    <section class="card">
+      <h2>Live Camera</h2>
+      <p>Live feed from edge camera.</p>
+      <div class="panel-wrapper">
+        <iframe
+          class="panel-frame"
+          src="http://192.168.2.13:8888/cam"
+          allow="autoplay; camera; microphone"
+       ></iframe>
+      </div>
+    </section>
+  </main>
+
+  <footer>
+    Local prototype UI · Nginx + Grafana @ 192.168.2.12
+  </footer>
+</body>
+</html>

@@ -31,6 +31,10 @@ static const unsigned long FAILOVER_AFTER_MS = 8000;
 static const unsigned long RECOVER_AFTER_MS  = 8000;
 static const unsigned long GW_STALE_MS       = 4000;
 static const unsigned long PUB_INTERVAL_MS   = 2000;
+// --- SIMULATED UPLINK LOSS (TEST FAILOVER) ---
+static const bool SIMULATE_UPLINK = true;
+static const unsigned long SIM_OK_MS   = 20000;  // 20s normal
+static const unsigned long SIM_DOWN_MS = 20000;  // 20s fake-down
 
 // ---------------- BLE Polar HR ----------------
 static const char* POLAR_PREFIX = "Polar H10";
@@ -161,6 +165,13 @@ void onEspNowRecv(const esp_now_recv_info_t* info, const uint8_t* data, int len)
 
 bool gatewayFreshAndUp(){ return (millis()-gwLastSeen)<GW_STALE_MS && gwUplinkOk; }
 
+bool simulateDownNow(){
+  if(!SIMULATE_UPLINK) return false;
+  unsigned long cycle = SIM_OK_MS + SIM_DOWN_MS;
+  unsigned long m = millis() % cycle;
+  return (m >= SIM_OK_MS);
+}
+
 static int lastPeerChannel = -1;
 void ensurePeerChannel(){
   if(WiFi.status()!=WL_CONNECTED) return;
@@ -210,8 +221,8 @@ static void hrCb(BLERemoteCharacteristic*, uint8_t* data, size_t len, bool) {
 class ScanCallbacks : public BLEAdvertisedDeviceCallbacks {
   void onResult(BLEAdvertisedDevice dev) override {
     if (!dev.haveName()) return;
-    std::string n = dev.getName();
-    if (n.rfind(POLAR_PREFIX, 0) != 0) return; // startswith
+    String n = dev.getName();
+    if (!n.startsWith(POLAR_PREFIX)) return; // startswith
 
     // capture first match
     polarDevice = new BLEAdvertisedDevice(dev);
@@ -322,7 +333,9 @@ void loop(){
 
   // Uplink logic
   uplink_ok_real = (WiFi.status()==WL_CONNECTED && mqtt.connected());
-  uplink_ok_effective = uplink_ok_real; // no simulated down here
+  bool simDown = simulateDownNow();
+  uplink_ok_effective = uplink_ok_real && !simDown;
+
 
   unsigned long now=millis();
 
@@ -368,13 +381,17 @@ void loop(){
     // If we don't have HR yet, publish bpm=0 and hrok=false (so dashboard shows “no sensor”)
     if(uplink_ok_effective && !usingGateway){
       char payload[220];
-      snprintf(payload,sizeof(payload),
+      snprintf(payload, sizeof(payload),
         "{\"node\":\"A\",\"seq\":%lu,\"mq2\":%u,\"bpm\":%u,\"hrok\":%s,"
-        "\"failover\":false,\"via\":\"self\",\"rssi\":%d,\"ble\":%s}",
-        (unsigned long)seq,mq2,bpm,
-        hrOk?"true":"false",
-        (WiFi.status()==WL_CONNECTED)?WiFi.RSSI():-127,
-        bleConnected?"true":"false");
+        "\"failover\":false,\"via\":\"self\",\"rssi\":%d,\"ble\":%s,\"sim_down\":%s}",
+        (unsigned long)seq,
+        mq2,
+        bpm,
+        hrOk ? "true" : "false",
+        (WiFi.status()==WL_CONNECTED) ? WiFi.RSSI() : -127,
+        bleConnected ? "true" : "false",
+        simDown ? "true" : "false"
+      );
 
       bool ok=mqtt.publish(topicFor('A').c_str(), payload);
       Serial.printf("[A] MQTT publish ok=%d bpm=%u hrok=%d\n", ok, bpm, hrOk);
@@ -389,4 +406,3 @@ void loop(){
 
   delay(2); // yields to BLE/WiFi tasks
 }
-

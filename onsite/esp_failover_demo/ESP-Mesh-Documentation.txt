@@ -1,2 +1,8 @@
 One important feature of our project is maintaining a level of redundancy at all times.
-We think its critical to avoid single points of failure, especially when it comes to transmitting biomedical data, used to evaluate health status. 
+We think its critical to avoid single points of failure, especially when it comes to transmitting biomedical data, used to evaluate health status.
+
+VERSION DESCRIPTIONS:
+Version 1: Consists of two esp-32s running espnow_A and espnow_B. The main feature of this setup is to forward data from A->B,when A fails to connect 
+to the internet (and the MQTT server). ESP_A "asks" its neighbor ESP_B, if it has a stable connection to the internet, and if it does, it forwards the data 
+to ESP_B. The data being handled in this version is real sensor data + fake bmp (heart rate) data. The ESPs communicate throught ESP-NOW.
+

@@ -4,5 +4,6 @@ We think its critical to avoid single points of failure, especially when it come
 VERSION DESCRIPTIONS:
 Version 1: Consists of two esp-32s running espnow_A and espnow_B. The main feature of this setup is to forward data from A->B,when A fails to connect 
 to the internet (and the MQTT server). ESP_A "asks" its neighbor ESP_B, if it has a stable connection to the internet, and if it does, it forwards the data 
-to ESP_B. The data being handled in this version is real sensor data + fake bmp (heart rate) data. The ESPs communicate throught ESP-NOW.
+to ESP_B. The data being handled in this version is fake bmp (heart rate) data. The ESPs communicate through ESP-NOW. VERSION1-FAILOVER.png shows the data
+received by the mqtt broker.
 

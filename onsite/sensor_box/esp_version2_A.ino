@@ -381,7 +381,15 @@ static void ensureWiFi() {
 
   uint32_t now = millis();
 
-  // Start an attempt if we aren't currently in one
+  // If we're currently connecting, DO NOT call WiFi.begin again.
+  // This is exactly what causes: "sta is connecting, cannot set config"
+  wl_status_t st = WiFi.status();
+  if (st == WL_IDLE_STATUS) {
+    // WL_IDLE_STATUS on ESP32 often means "in progress"
+    return;
+  }
+
+  // If no attempt in progress, start one
   if (wifiAttemptSince == 0) {
     wifiAttemptSince = now;
     wifiIndex = (wifiIndex + 1) % WIFI_LIST_N;
@@ -389,14 +397,26 @@ static void ensureWiFi() {
     WiFi.mode(WIFI_STA);
     WiFi.setSleep(false);
 
-    // IMPORTANT: don't spam begin
     if (now - lastBeginMs >= WIFI_BEGIN_COOLDOWN_MS) {
       lastBeginMs = now;
+
+      // Make sure previous attempt is fully stopped before new begin
+      WiFi.disconnect(true /*wifioff*/);
+      delay(50);
+
       WiFi.begin(WIFI_LIST[wifiIndex].ssid, WIFI_LIST[wifiIndex].pass);
       Serial.printf("[WiFi] begin ssid=%s\n", WIFI_LIST[wifiIndex].ssid);
     }
     return;
   }
+
+  // Wait the full attempt window before switching SSID
+  if (now - wifiAttemptSince < WIFI_ATTEMPT_WINDOW_MS) return;
+
+  // Attempt window expired -> allow next SSID on next call
+  wifiAttemptSince = 0;
+}
+
 
   // If we're still within the attempt window, just wait and don't touch config
   if (now - wifiAttemptSince < WIFI_ATTEMPT_WINDOW_MS) {

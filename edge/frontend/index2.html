@@ -1,0 +1,177 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Command Center – Patras HQ</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <link rel="stylesheet" href="styles.css" />
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+</head>
+
+<body>
+  <div id="app">
+    <header class="topbar">
+      <div class="brand">
+        <div class="brand-mark"><i class="fa-solid fa-shield-heart"></i></div>
+        <div class="brand-text">
+          <div class="brand-title">SMART FIRE COMMAND</div>
+          <div class="brand-sub">Patras Sector – Live Coordination</div>
+        </div>
+      </div>
+
+      <div class="right-status">
+        <div class="system-status" id="connectionStatus">
+          <span class="status-dot"></span>
+          MQTT: Connecting…
+        </div>
+        <div class="clock" id="clock">—</div>
+      </div>
+    </header>
+
+    <nav class="tabs">
+      <button class="tab-btn active" onclick="switchTab('ops')">
+        <i class="fa-solid fa-map-location-dot"></i> Live Ops
+      </button>
+      <button class="tab-btn" onclick="switchTab('focus')">
+        <i class="fa-solid fa-crosshairs"></i> Unit Focus
+      </button>
+      <button class="tab-btn" onclick="switchTab('video')">
+        <i class="fa-solid fa-video"></i> Video
+      </button>
+    </nav>
+
+    <!-- Toast (single, non-spammy) -->
+    <div id="toast" class="toast hidden"></div>
+
+    <main class="content">
+      <!-- OPS TAB -->
+      <section id="tab-ops" class="tab-pane active">
+        <div class="dashboard-grid">
+
+          <!-- Left: Map (slightly smaller) -->
+          <div class="panel map-panel">
+            <div class="panel-header">
+              <div class="ph-left">
+                <span class="ph-title">Sector Map (Patras)</span>
+                <span class="ph-sub">Click a unit for details</span>
+              </div>
+              <div class="ph-right">
+                <button class="btn btn-ghost" id="btnRecenter">
+                  <i class="fa-solid fa-location-crosshairs"></i> Recenter
+                </button>
+              </div>
+            </div>
+            <div id="mainMap" class="map"></div>
+          </div>
+
+          <!-- Right: Mission status + list -->
+          <aside class="sidebar">
+            <div class="panel alert-panel" id="alertBox">
+              <div class="alert-header">
+                <div class="ah-left">
+                  <i class="fa-solid fa-triangle-exclamation"></i>
+                  <span>Mission Alerts</span>
+                </div>
+                <span class="badge" id="alertBadge">Nominal</span>
+              </div>
+
+              <div class="alert-content" id="alertContent">
+                <div class="alert-empty">All systems nominal. No active threats.</div>
+              </div>
+            </div>
+
+            <div class="panel team-panel">
+              <div class="panel-header">
+                <div class="ph-left">
+                  <span class="ph-title">Squad Overview</span>
+                  <span class="ph-sub">Status + last seen</span>
+                </div>
+              </div>
+              <div id="teamList" class="team-list"></div>
+            </div>
+          </aside>
+
+        </div>
+      </section>
+
+      <!-- FOCUS TAB -->
+      <section id="tab-focus" class="tab-pane">
+        <div class="focus-layout">
+          <div class="panel focus-controls">
+            <div class="focus-row">
+              <div class="focus-pick">
+                <label for="focusSelect">Focus unit</label>
+                <select id="focusSelect"></select>
+              </div>
+
+              <div class="focus-stats" id="focusStats">
+                <!-- filled by JS -->
+              </div>
+            </div>
+
+            <div class="focus-hints" id="focusHints">
+              <!-- filled by JS -->
+            </div>
+          </div>
+
+          <div class="panel focus-map-panel">
+            <div class="panel-header">
+              <div class="ph-left">
+                <span class="ph-title">Focus Map</span>
+                <span class="ph-sub">Locked to selected unit</span>
+              </div>
+            </div>
+            <div id="focusMap" class="map"></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- VIDEO TAB -->
+      <section id="tab-video" class="tab-pane">
+        <div class="video-layout">
+          <div class="panel video-controls">
+            <div class="panel-header">
+              <div class="ph-left">
+                <span class="ph-title">Video Link</span>
+                <span class="ph-sub">Local / LAN stream or remote gateway</span>
+              </div>
+            </div>
+
+            <div class="video-form">
+              <label for="videoUrl">Embed URL (iframe)</label>
+              <input id="videoUrl" type="text" placeholder="e.g. http://192.168.2.20:8080/stream" />
+              <button class="btn" id="btnLoadVideo"><i class="fa-solid fa-plug"></i> Load</button>
+              <div class="video-note">
+                Tip: Use an <b>HTTP MJPEG</b> page or an <b>embed-friendly</b> stream endpoint.
+              </div>
+            </div>
+          </div>
+
+          <div class="panel video-panel">
+            <div class="panel-header">
+              <div class="ph-left">
+                <span class="ph-title">Live Feed</span>
+                <span class="ph-sub">For situational awareness</span>
+              </div>
+            </div>
+
+            <div class="video-frame-wrap">
+              <div class="video-placeholder" id="videoPlaceholder">
+                <i class="fa-solid fa-video-slash"></i>
+                <p>No video loaded.</p>
+              </div>
+              <iframe id="videoFrame" class="video-frame hidden" allow="autoplay"></iframe>
+            </div>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script src="https://unpkg.com/mqtt/dist/mqtt.min.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

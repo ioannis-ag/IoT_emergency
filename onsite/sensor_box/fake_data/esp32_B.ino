@@ -62,40 +62,6 @@ static uint32_t lastEcg = 0;
 // ---------------- Time (UTC via NTP) ----------------
 static bool timeInited = false;
 static uint32_t lastTimeTry = 0;
-// ============================================================
-// Realistic physiology + environment model  (MUST be above any use)
-// ============================================================
-
-enum IncidentType : uint8_t {
-  INC_NONE = 0,
-  INC_SMOKE_CO = 1,
-  INC_HEAT = 2,
-  INC_TACHY = 3,
-  INC_WEARABLE_DROP = 4,
-  INC_RADIO_SILENCE = 5
-};
-
-struct Incident {
-  bool active = false;
-  IncidentType type = INC_NONE;
-  uint32_t startMs = 0;
-  uint32_t endMs = 0;
-  uint32_t rampMs = 0;
-  float severity = 0.0f;   // 0..1
-  uint32_t id = 0;
-};
-
-static Incident gInc;
-
-// ---- Forward declarations (prevents Arduino from generating broken prototypes)
-static float incidentEnvelope(const Incident& inc, uint32_t nowMs);
-static const char* incidentTypeToStr(IncidentType t);
-static const char* incidentSeverityToStr(float s);
-static void endIncident();
-static IncidentType pickIncidentType();
-static void scheduleNextIncident(uint32_t nowMs);
-static void maybeStartIncident(uint32_t nowMs);
-static void updateIncident(uint32_t nowMs);
 
 // ---------------- Random utilities ----------------
 static float frand(float a, float b) {
@@ -170,10 +136,9 @@ static void ensureMQTT() {
 }
 
 // ============================================================
-// Realistic physiology + environment model
+// Realistic physiology + environment model  (MUST be above any use)
 // ============================================================
 
-// A compact incident model that ramps up, holds, then ramps down.
 enum IncidentType : uint8_t {
   INC_NONE = 0,
   INC_SMOKE_CO = 1,
@@ -194,6 +159,16 @@ struct Incident {
 };
 
 static Incident gInc;
+
+// ---- Forward declarations (prevents Arduino from generating broken prototypes)
+static float incidentEnvelope(const Incident& inc, uint32_t nowMs);
+static const char* incidentTypeToStr(IncidentType t);
+static const char* incidentSeverityToStr(float s);
+static void endIncident();
+static IncidentType pickIncidentType();
+static void scheduleNextIncident(uint32_t nowMs);
+static void maybeStartIncident(uint32_t nowMs);
+static void updateIncident(uint32_t nowMs);
 
 // Baselines (tuned for active firefighter conditions).
 static float baseTempC = 34.0f;

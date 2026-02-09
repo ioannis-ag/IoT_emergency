@@ -5,10 +5,10 @@
 #include <math.h>
 
 // ---------------- Identity ----------------
-static constexpr char NODE_ID_CHAR = 'B';
-static const char*    NODE_ID      = "B";
+static constexpr char NODE_ID_CHAR = 'D';
+static const char*    NODE_ID      = "D";
 static const char*    TEAM_ID      = "Team_A";
-static const char*    FIREFIGHTER_ID = "FF_B";
+static const char*    FIREFIGHTER_ID = "FF_D";
 
 // ---------------- Wi-Fi credentials rotation ----------------
 struct WifiCred { const char* ssid; const char* pass; };

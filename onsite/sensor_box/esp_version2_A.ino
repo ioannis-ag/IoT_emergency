@@ -66,6 +66,9 @@ static const uint32_t CAPSULE_MS       = 2000;
 static const uint32_t WIFI_RETRY_MS    = 2000;
 static const uint32_t MQTT_RETRY_MS    = 2000;
 
+static const uint32_t WIFI_ATTEMPT_WINDOW_MS = 15000; // give SSID 15s before switching
+static const uint32_t WIFI_BEGIN_COOLDOWN_MS = 2500;  // minimum gap between begin()
+
 static const unsigned long FAILOVER_AFTER_MS = 8000;
 static const unsigned long RECOVER_AFTER_MS  = 8000;
 
@@ -88,6 +91,9 @@ static const uint16_t ECG_BUNDLE_MAX = 700;
 
 static const int ECG_QUEUE_LEN = 24;
 static const int ECG_PKT_MAX   = 260;
+
+static uint32_t wifiAttemptSince = 0;
+static uint32_t lastBeginMs = 0;
 
 // ============================================================
 // DATA STRUCTURES
@@ -326,6 +332,8 @@ static void ensurePeerChannel() {
 }
 
 static void sendCapsule() {
+// If not connected to WiFi, channel is unknown and ESP-NOW to B will likely fail.
+  if (WiFi.status() != WL_CONNECTED) return;
   CapsuleMsg c{};
   c.type = MSG_CAPSULE;
   c.src_id = NODE_ID_CHAR;
@@ -372,17 +380,33 @@ static void ensureWiFi() {
   if (WiFi.status() == WL_CONNECTED) return;
 
   uint32_t now = millis();
-  if (now - lastWifiTry < WIFI_RETRY_MS) return;
-  lastWifiTry = now;
 
-  wifiIndex = (wifiIndex + 1) % WIFI_LIST_N;
+  // Start an attempt if we aren't currently in one
+  if (wifiAttemptSince == 0) {
+    wifiAttemptSince = now;
+    wifiIndex = (wifiIndex + 1) % WIFI_LIST_N;
 
-  WiFi.mode(WIFI_STA);
-  WiFi.setSleep(false);
-  WiFi.begin(WIFI_LIST[wifiIndex].ssid, WIFI_LIST[wifiIndex].pass);
+    WiFi.mode(WIFI_STA);
+    WiFi.setSleep(false);
 
-  Serial.printf("[WiFi] begin ssid=%s\n", WIFI_LIST[wifiIndex].ssid);
+    // IMPORTANT: don't spam begin
+    if (now - lastBeginMs >= WIFI_BEGIN_COOLDOWN_MS) {
+      lastBeginMs = now;
+      WiFi.begin(WIFI_LIST[wifiIndex].ssid, WIFI_LIST[wifiIndex].pass);
+      Serial.printf("[WiFi] begin ssid=%s\n", WIFI_LIST[wifiIndex].ssid);
+    }
+    return;
+  }
+
+  // If we're still within the attempt window, just wait and don't touch config
+  if (now - wifiAttemptSince < WIFI_ATTEMPT_WINDOW_MS) {
+    return;
+  }
+
+  // Attempt window expired → switch to next SSID
+  wifiAttemptSince = 0;
 }
+
 
 static void ensureMQTT() {
   if (mqtt.connected()) return;
@@ -619,8 +643,8 @@ static void publishEnvWearGw() {
   env["failover"] = FAILOVER_BOOL;
   env["forwardHopCount"] = FORWARD_HOPS;
   env["observedAt"] = ts;
-  env["tempC"] = dhtOk ? tempC : nullptr;
-  env["humidityPct"] = dhtOk ? humPct : nullptr;
+  if (dhtOk) env["tempC"] = tempC; else env["tempC"] = nullptr;
+  if (dhtOk) env["humidityPct"] = humPct; else env["humidityPct"] = nullptr;
   env["mq2Raw"] = mq2_adc;
   env["mq2Digital"] = (int)mq2_dig;
   env["rssi"] = (int)wifiRssiOrNeg127();
@@ -639,8 +663,8 @@ static void publishEnvWearGw() {
   wear["failover"] = FAILOVER_BOOL;
   wear["forwardHopCount"] = FORWARD_HOPS;
   wear["observedAt"] = ts;
-  wear["hrBpm"] = hrOk ? (int)bpm : nullptr;
-  wear["rrMsLatest"] = rrOk ? (int)rr : nullptr;
+  if (hrOk)  wear["hrBpm"] = (int)bpm; else wear["hrBpm"] = nullptr;
+  if (rrOk)  wear["rrMsLatest"] = (int)rr; else wear["rrMsLatest"] = nullptr;
   wear["wearableOk"] = (bool)(bleConnected && hrOk);
   wear["source"] = "ble";
 
@@ -767,6 +791,7 @@ void loop() {
 
   uplink_ok_real = (WiFi.status() == WL_CONNECTED && mqtt.connected());
   uplink_ok_effective = uplink_ok_real;
+  if (WiFi.status() == WL_CONNECTED) wifiAttemptSince = 0;
 
   unsigned long now = millis();
 

@@ -10,7 +10,7 @@ static const char* NODE_ID         = "B";
 static const char* TEAM_ID         = "Team_A";
 static const char* FIREFIGHTER_ID  = "FF_B";
 
-// ===================== WIFI (edit as needed) =====================
+// ===================== WIFI  =====================
 struct WifiCred { const char* ssid; const char* pass; };
 static WifiCred WIFI_LIST[] = {
   { "VODAFONE_H268Q-4057", "SFzDE5ZxHyQPQ2FQ" },
@@ -18,11 +18,11 @@ static WifiCred WIFI_LIST[] = {
 };
 static constexpr int WIFI_LIST_N = sizeof(WIFI_LIST) / sizeof(WIFI_LIST[0]);
 
-// ===================== MQTT (edit as needed) =====================
+// ===================== MQTT  =====================
 static const char* MQTT_HOST = "192.168.2.13";
 static const int   MQTT_PORT = 1883;
 
-// Topics (same scheme as your ESP32A + edge controller)
+// Topics 
 static String TOPIC_ENV = String("ngsi/Environment/") + TEAM_ID + "/" + FIREFIGHTER_ID;
 static String TOPIC_BIO = String("ngsi/Biomedical/")  + TEAM_ID + "/" + FIREFIGHTER_ID;
 static String TOPIC_GW  = String("ngsi/Gateway/")     + NODE_ID;

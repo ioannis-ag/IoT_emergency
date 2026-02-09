@@ -1,0 +1,480 @@
+#!/usr/bin/env python3
+import json
+import logging
+import math
+import random
+import threading
+import time
+from datetime import datetime, timezone
+from typing import Any, Dict, Tuple, List, Optional
+
+import paho.mqtt.client as mqtt
+import requests
+
+# =========================================================
+# CONFIG
+# =========================================================
+MQTT_BROKER_HOST = "localhost"
+MQTT_BROKER_PORT = 1883
+
+MQTT_TOPICS = [
+    ("ngsi/Environment/+/+", 0),
+    ("ngsi/Biomedical/+/+", 0),
+    ("ngsi/Location/+/+", 0),
+    ("ngsi/Gateway/+", 0),
+    ("raw/ECG/+/+", 0),
+]
+
+ORION_URL = "http://192.168.2.12:1026/v2/op/update"
+ORION_TIMEOUT = 5
+
+TEAM_ID = "Team_A"
+REAL_FF_ID = "FF_A"
+
+STATUS_TOPIC_PREFIX = "edge/status"
+ALERTS_TOPIC_PREFIX = "edge/alerts"
+
+FALLBACK_LAT = 38.2466
+FALLBACK_LON = 21.7346
+
+FAKE_LOC_ACCURACY_M = 8
+FAKE_LOC_HZ = 1.0
+
+# bubble radii (meters)
+BUBBLE_NEAR_M = 25.0
+BUBBLE_CRISIS_M = 110.0
+CRISIS_MAX_M = 160.0
+
+MAX_SPEED_MPS = 1.2
+MAX_ACCEL_MPS2 = 0.25
+ALERT_COOLDOWN_SEC = 10.0
+
+FF_NAMES = {
+    "FF_A": "Alex (Leader)",
+    "FF_B": "Maria",
+    "FF_C": "Nikos (Crisis)",
+    "FF_D": "Eleni",
+}
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+
+# =========================================================
+# ORION HARD FILTER
+# =========================================================
+ORION_ALLOWED_ATTRS = {
+    "lat", "lon", "accuracyM",
+    "tempC", "humidityPct", "mq2Raw", "mq2Digital", "coPpm",
+    "hrBpm", "wearableOk",
+    "rssi", "battery", "failover", "via",
+    "observedAt", "timestamp", "tst",
+}
+
+def filter_orion_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
+    clean = {}
+    for k, v in payload.items():
+        if k not in ORION_ALLOWED_ATTRS:
+            continue
+        if v is None:
+            continue
+        if isinstance(v, (list, dict)):
+            continue
+        if isinstance(v, (int, float)):
+            if not math.isfinite(float(v)):
+                continue
+            clean[k] = v
+            continue
+        if isinstance(v, str):
+            s = "".join(ch for ch in v if ch.isprintable()).strip()
+            if s:
+                clean[k] = s
+    return clean
+
+def ngsi_type(v):
+    if isinstance(v, bool):
+        return "Boolean"
+    if isinstance(v, (int, float)):
+        return "Number"
+    return "Text"
+
+def build_ngsi_entity(eid: str, etype: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+    ent = {"id": eid, "type": etype}
+    for k, v in payload.items():
+        ent[k] = {"type": ngsi_type(v), "value": v}
+    ent["timestamp"] = {"type": "Number", "value": int(time.time())}
+    return ent
+
+def send_to_orion(entity: Dict[str, Any]):
+    try:
+        r = requests.post(
+            ORION_URL,
+            json={"actionType": "append", "entities": [entity]},
+            timeout=ORION_TIMEOUT,
+        )
+        if r.status_code not in (200, 201, 204):
+            logging.warning("Orion %s: %s", r.status_code, r.text[:200])
+    except Exception as e:
+        logging.error("Orion error: %s", e)
+
+def topic_to_entity(topic: str):
+    p = topic.split("/")
+    if len(p) == 4 and p[0] == "ngsi":
+        _, kind, team, ff = p
+        if kind == "Environment":
+            return f"EnvNode:{team}:{ff}", "Environment", team, ff
+        if kind == "Biomedical":
+            return f"Wearable:{team}:{ff}", "Biomedical", team, ff
+        if kind == "Location":
+            return f"Phone:{team}:{ff}", "Location", team, ff
+    if len(p) == 3 and p[1] == "Gateway":
+        return f"Gateway:{p[2]}", "Gateway", None, p[2]
+    return None, None, None, None
+
+# =========================================================
+# STATE
+# =========================================================
+last_loc: Dict[Tuple[str, str], Dict[str, Any]] = {}
+last_env: Dict[Tuple[str, str], Dict[str, Any]] = {}
+last_bio: Dict[Tuple[str, str], Dict[str, Any]] = {}
+last_seen: Dict[Tuple[str, str], float] = {}
+
+_last_alert_sig: Dict[Tuple[str, str], str] = {}
+_last_alert_ts: Dict[Tuple[str, str], float] = {}
+
+def nowz() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+def haversine_m(lat1, lon1, lat2, lon2) -> float:
+    R = 6371000.0
+    p1, p2 = math.radians(lat1), math.radians(lat2)
+    dphi = math.radians(lat2 - lat1)
+    dl = math.radians(lon2 - lon1)
+    a = math.sin(dphi/2)**2 + math.cos(p1)*math.cos(p2)*math.sin(dl/2)**2
+    return 2*R*math.asin(math.sqrt(a))
+
+# =========================================================
+# UI SUMMARY (MATCHES app.js EXACTLY)
+# =========================================================
+def build_ui_summary(team: str, ff: str):
+    key = (team, ff)
+    loc = last_loc.get(key, {})
+    env = last_env.get(key, {})
+    bio = last_bio.get(key, {})
+
+    lat = loc.get("lat")
+    lon = loc.get("lon")
+    acc = loc.get("accuracyM")
+
+    hr = bio.get("hrBpm")
+    temp = env.get("tempC")
+    mq2 = env.get("mq2Raw")
+
+    now = time.time()
+    seen = last_seen.get(key)
+    last_seen_sec = int(now - seen) if seen else None
+
+    # ---- Pulse ----
+    if isinstance(hr, int):
+        if hr < 130:
+            pulse_level, pulse_hint = "Normal", f"{hr} bpm"
+        elif hr < 160:
+            pulse_level, pulse_hint = "Elevated", f"{hr} bpm"
+        elif hr < 180:
+            pulse_level, pulse_hint = "High", f"{hr} bpm"
+        else:
+            pulse_level, pulse_hint = "Critical", f"{hr} bpm"
+    else:
+        pulse_level = pulse_hint = "—"
+
+    # ---- Heat ----
+    if isinstance(temp, (int, float)):
+        t = float(temp)
+        if t < 45:
+            heat_level, heat_hint = "OK", f"{t:.1f} °C"
+        elif t < 50:
+            heat_level, heat_hint = "Warm", f"{t:.1f} °C"
+        elif t < 60:
+            heat_level, heat_hint = "Hot", f"{t:.1f} °C"
+        else:
+            heat_level, heat_hint = "Danger", f"{t:.1f} °C"
+    else:
+        heat_level = heat_hint = "—"
+
+    # ---- Smoke ----
+    if isinstance(mq2, int):
+        if mq2 < 1800:
+            smoke_level, smoke_hint = "Low", str(mq2)
+        elif mq2 < 2600:
+            smoke_level, smoke_hint = "Moderate", str(mq2)
+        elif mq2 < 3200:
+            smoke_level, smoke_hint = "High", str(mq2)
+        else:
+            smoke_level, smoke_hint = "Extreme", str(mq2)
+    else:
+        smoke_level = smoke_hint = "—"
+
+    # ---- Distance ----
+    dist = None
+    anchor = last_loc.get((team, REAL_FF_ID), {})
+    al, ao = anchor.get("lat"), anchor.get("lon")
+    if all(isinstance(x, (int, float)) for x in (lat, lon, al, ao)):
+        dist = haversine_m(lat, lon, al, ao)
+
+    # ---- Severity ----
+    severity = "info"
+    status = "normal"
+    if pulse_level in ("High", "Critical") or heat_level in ("Hot", "Danger") or smoke_level in ("High", "Extreme"):
+        severity = "warn"
+        status = "warn"
+    if pulse_level == "Critical" or heat_level == "Danger" or smoke_level == "Extreme":
+        severity = "danger"
+        status = "danger"
+
+    summary = {
+        "teamId": team,
+        "ffId": ff,
+        "name": FF_NAMES.get(ff, ff),
+        "status": status,
+        "severity": severity,
+        "observedAt": nowz(),
+        "lastSeenSec": last_seen_sec,
+        "lat": lat,
+        "lon": lon,
+        "accuracyM": acc,
+        "hrBpm": hr,
+        "tempC": temp,
+        "mq2Raw": mq2,
+        "pulseLevel": pulse_level,
+        "pulseHint": pulse_hint,
+        "heatLevel": heat_level,
+        "heatHint": heat_hint,
+        "smokeLevel": smoke_level,
+        "smokeHint": smoke_hint,
+        "distanceToLeaderM": dist,
+    }
+
+    alerts: List[Dict[str, Any]] = []
+
+    def add_alert(sev, cat, title, detail):
+        alerts.append({
+            "teamId": team,
+            "ffId": ff,
+            "name": FF_NAMES.get(ff, ff),
+            "severity": sev,
+            "category": cat,
+            "title": title,
+            "detail": detail,
+            "observedAt": nowz(),
+        })
+
+    if pulse_level == "Critical":
+        add_alert("danger", "health", "Pulse Critical", pulse_hint)
+    elif pulse_level == "High":
+        add_alert("warn", "health", "Pulse High", pulse_hint)
+
+    if heat_level == "Danger":
+        add_alert("danger", "environment", "Heat Danger", heat_hint)
+    elif heat_level == "Hot":
+        add_alert("warn", "environment", "Heat Warning", heat_hint)
+
+    if smoke_level == "Extreme":
+        add_alert("danger", "environment", "Smoke Extreme", smoke_hint)
+    elif smoke_level == "High":
+        add_alert("warn", "environment", "Smoke Rising", smoke_hint)
+
+    if isinstance(dist, (int, float)):
+        if dist >= 120:
+            add_alert("danger", "location", "Separated", f"{int(dist)} m from leader")
+        elif dist >= 70:
+            add_alert("warn", "location", "Drifting", f"{int(dist)} m from leader")
+
+    alerts_packet = {
+        "teamId": team,
+        "ffId": ff,
+        "name": FF_NAMES.get(ff, ff),
+        "worst": status,
+        "alerts": alerts,
+        "observedAt": nowz(),
+    }
+
+    return summary, alerts_packet
+
+def publish_ui(client: mqtt.Client, team: str, ff: str):
+    summary, alerts_packet = build_ui_summary(team, ff)
+    client.publish(f"{STATUS_TOPIC_PREFIX}/{team}/{ff}", json.dumps(summary), retain=True)
+
+    sig = json.dumps([(a["severity"], a["category"], a["title"]) for a in alerts_packet["alerts"]])
+    key = (team, ff)
+    ts = time.time()
+    if sig != _last_alert_sig.get(key) and ts - _last_alert_ts.get(key, 0) >= ALERT_COOLDOWN_SEC:
+        client.publish(f"{ALERTS_TOPIC_PREFIX}/{team}/{ff}", json.dumps(alerts_packet), retain=True)
+        _last_alert_sig[key] = sig
+        _last_alert_ts[key] = ts
+
+# =========================================================
+# FAKE LOCATION SIM
+# =========================================================
+def meters_to_deg_lat(m): return m / 111_320.0
+def meters_to_deg_lon(m, lat): return m / (111_320.0 * math.cos(math.radians(lat)))
+
+class FakeFF:
+    def __init__(self, ff_id, crisis):
+        self.ff = ff_id
+        self.crisis = crisis
+        self.lat = None
+        self.lon = None
+        self.vx = self.vy = 0.0
+
+    def attach(self, al, ao):
+        r = BUBBLE_CRISIS_M if self.crisis else BUBBLE_NEAR_M
+        ang = random.random() * 2 * math.pi
+        self.lat = al + meters_to_deg_lat(r * math.cos(ang))
+        self.lon = ao + meters_to_deg_lon(r * math.sin(ang), al)
+
+    def step(self, dt, al, ao):
+        dx = (self.lon - ao) * (111_320.0 * math.cos(math.radians(al)))
+        dy = (self.lat - al) * 111_320.0
+        dist = math.hypot(dx, dy)
+
+        target = BUBBLE_CRISIS_M if self.crisis else BUBBLE_NEAR_M
+        err = dist - target
+        ax = -(dx / (dist + 1e-6)) * (0.05 * err)
+        ay = -(dy / (dist + 1e-6)) * (0.05 * err)
+
+        if self.crisis:
+            ax += (dx / (dist + 1e-6)) * 0.04
+            ay += (dy / (dist + 1e-6)) * 0.04
+
+        a = math.hypot(ax, ay)
+        if a > MAX_ACCEL_MPS2:
+            s = MAX_ACCEL_MPS2 / a
+            ax *= s
+            ay *= s
+
+        self.vx += ax * dt
+        self.vy += ay * dt
+
+        v = math.hypot(self.vx, self.vy)
+        if v > MAX_SPEED_MPS:
+            s = MAX_SPEED_MPS / v
+            self.vx *= s
+            self.vy *= s
+
+        self.lat += meters_to_deg_lat(self.vy * dt)
+        self.lon += meters_to_deg_lon(self.vx * dt, self.lat)
+
+        return {
+            "teamId": TEAM_ID,
+            "ffId": self.ff,
+            "lat": self.lat,
+            "lon": self.lon,
+            "accuracyM": FAKE_LOC_ACCURACY_M,
+            "observedAt": nowz(),
+            "source": "fake",
+        }
+
+fake_units = {
+    "FF_B": FakeFF("FF_B", False),
+    "FF_C": FakeFF("FF_C", True),
+    "FF_D": FakeFF("FF_D", False),
+}
+
+def fake_loop(client):
+    logging.info("Fake sim: waiting for real FF_A location ...")
+    while (TEAM_ID, REAL_FF_ID) not in last_loc:
+        time.sleep(0.5)
+
+    al = last_loc[(TEAM_ID, REAL_FF_ID)]["lat"]
+    ao = last_loc[(TEAM_ID, REAL_FF_ID)]["lon"]
+    logging.info("Fake sim: anchor acquired")
+
+    for sim in fake_units.values():
+        sim.attach(al, ao)
+
+    period = 1.0 / FAKE_LOC_HZ
+    last_t = time.time()
+
+    while True:
+        t = time.time()
+        dt = max(0.05, min(1.0, t - last_t))
+        last_t = t
+
+        a = last_loc.get((TEAM_ID, REAL_FF_ID))
+        if a:
+            al, ao = a["lat"], a["lon"]
+
+        for ff, sim in fake_units.items():
+            p = sim.step(dt, al, ao)
+            client.publish(f"ngsi/Location/{TEAM_ID}/{ff}", json.dumps(p), retain=True)
+            last_loc[(TEAM_ID, ff)] = {"lat": p["lat"], "lon": p["lon"], "accuracyM": p["accuracyM"]}
+            last_seen[(TEAM_ID, ff)] = time.time()
+            publish_ui(client, TEAM_ID, ff)
+
+        time.sleep(period)
+
+# =========================================================
+# MQTT
+# =========================================================
+def on_connect(client, userdata, flags, rc):
+    if rc == 0:
+        logging.info("✅ Connected to MQTT broker")
+        for t, q in MQTT_TOPICS:
+            client.subscribe(t, q)
+    else:
+        logging.error("❌ MQTT connect failed rc=%s", rc)
+
+def on_message(client, userdata, msg):
+    if msg.topic.startswith("raw/ECG/"):
+        return
+
+    try:
+        payload = json.loads(msg.payload.decode())
+    except Exception:
+        return
+
+    eid, etype, team, ff = topic_to_entity(msg.topic)
+    if not eid:
+        return
+
+    # Orion
+    filtered = filter_orion_payload(payload)
+    if filtered:
+        send_to_orion(build_ngsi_entity(eid, etype, filtered))
+
+    # State + UI
+    if etype == "Location" and team and ff:
+        if "accuracyM" not in payload and "acc" in payload:
+            payload["accuracyM"] = payload.get("acc")
+
+        if isinstance(payload.get("lat"), (int, float)) and isinstance(payload.get("lon"), (int, float)):
+            last_loc[(team, ff)] = {
+                "lat": payload.get("lat"),
+                "lon": payload.get("lon"),
+                "accuracyM": payload.get("accuracyM"),
+            }
+            last_seen[(team, ff)] = time.time()
+            publish_ui(client, team, ff)
+
+    elif etype == "Environment" and team and ff:
+        last_env[(team, ff)] = payload
+        last_seen[(team, ff)] = time.time()
+        publish_ui(client, team, ff)
+
+    elif etype == "Biomedical" and team and ff:
+        last_bio[(team, ff)] = payload
+        last_seen[(team, ff)] = time.time()
+        publish_ui(client, team, ff)
+
+# =========================================================
+# MAIN
+# =========================================================
+def main():
+    client = mqtt.Client()
+    client.on_connect = on_connect
+    client.on_message = on_message
+    client.connect(MQTT_BROKER_HOST, MQTT_BROKER_PORT, keepalive=60)
+
+    threading.Thread(target=fake_loop, args=(client,), daemon=True).start()
+    client.loop_forever()
+
+if __name__ == "__main__":
+    main()

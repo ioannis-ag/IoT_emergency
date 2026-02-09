@@ -1,0 +1,17 @@
+{
+  "teamId": "Team_A",
+  "ffId": "FF_C",
+  "source": {
+    "provider": "PhysioNet",
+    "dataset": "MIT-BIH Malignant Ventricular Ectopy Database (VFDB)",
+    "record": "418",
+    "pn_dir": "vfdb",
+    "annotation_used": "atr",
+    "segment_seconds": 120,
+    "pre_roll_seconds": 10,
+    "original_fs_hz": 250.0,
+    "downsample_step": 2,
+    "output_fs_hz": 125.0,
+    "channel_index": 0
+  }
+}

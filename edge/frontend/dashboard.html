@@ -1,0 +1,139 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Smart Firefighter – Command Dashboard</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script src="https://unpkg.com/mqtt/dist/mqtt.min.js"></script>
+
+  <link rel="stylesheet" href="./styles.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span style="font-size:18px">🔥</span>
+      <span>Smart Firefighter</span>
+      <span class="badge">Patras • Team_A</span>
+    </div>
+
+    <div class="tabs">
+      <button class="tabbtn active" data-tab="ops">Operations</button>
+      <button class="tabbtn" data-tab="focus">Focus</button>
+      <button class="tabbtn" data-tab="video">Video</button>
+      <span class="badge">MQTT: <span id="mqttStatus">disconnected</span></span>
+    </div>
+  </header>
+
+  <!-- OPERATIONS -->
+  <main id="view_ops" class="container view viewOps active">
+    <aside class="panel left">
+      <div class="sectionHeader">
+        <h2>Team Members</h2>
+        <div class="sub">Click a member to inspect</div>
+      </div>
+
+      <div class="searchRow">
+        <input id="searchBox" type="text" placeholder="Search (FF_A, FF_B…)">
+        <select id="focusSelectOps" title="Focus on a firefighter">
+          <option value="">Focus…</option>
+        </select>
+      </div>
+
+      <div id="roster" class="roster"></div>
+
+      <div class="drawer" id="drawer">
+        <h3 id="drawerTitle">Select a firefighter</h3>
+        <div class="grid" id="drawerGrid"></div>
+        <div class="mini" id="drawerHint">Tip: alerts appear top-right. Markers turn red & pulse on danger.</div>
+      </div>
+    </aside>
+
+    <section class="panel right">
+      <div class="mapWrap">
+        <div id="map"></div>
+
+        <div class="hud">
+          <div class="hudBox">
+            <div class="hudRow"><span class="hudKey">Last message</span> <span class="hudVal" id="lastMsg">–</span></div>
+            <div class="hudRow"><span class="hudKey">Focused</span> <span class="hudVal" id="focusedName">–</span></div>
+          </div>
+        </div>
+
+        <div class="toastStack" id="toastStack"></div>
+      </div>
+    </section>
+  </main>
+
+  <!-- FOCUS -->
+  <main id="view_focus" class="container view viewFocus">
+    <section class="panel" style="flex:1; display:flex; flex-direction:column;">
+      <div class="sectionHeader">
+        <h2>Focus Mode</h2>
+        <div class="sub">Clean view for one firefighter</div>
+      </div>
+
+      <div class="focusTop">
+        <select id="focusSelect">
+          <option value="">Select firefighter…</option>
+        </select>
+        <span class="badge">Auto-centers on selection</span>
+      </div>
+
+      <div class="focusBody">
+        <div class="focusCard">
+          <h3 id="focusName">–</h3>
+          <div class="bigSev">
+            <span class="bigDot offline" id="focusDot"></span>
+            <span>Status: <b id="focusStatus">–</b></span>
+            <span class="badge" id="focusLastSeen">last seen: –</span>
+          </div>
+
+          <div style="height:14px"></div>
+          <div class="grid" id="focusGrid"></div>
+
+          <div class="mini">
+            In Focus Mode, alerts still pop up in Operations. Use this view for stable monitoring of one person.
+          </div>
+        </div>
+
+        <div class="focusCard" style="min-width:420px">
+          <h3>Mini Map</h3>
+          <div style="height:420px; border:1px solid var(--border); border-radius:14px; overflow:hidden" id="miniMap"></div>
+          <div class="mini">Separate map instance (nice for dual-screen).</div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <!-- VIDEO -->
+  <main id="view_video" class="container view viewVideo">
+    <section class="panel" style="flex:1; display:flex; flex-direction:column;">
+      <div class="sectionHeader">
+        <h2>Video</h2>
+        <div class="sub">Live camera stream</div>
+      </div>
+
+      <div style="padding:14px; display:flex; gap:10px; align-items:center;">
+        <span class="badge">Source:</span>
+        <input id="camUrl" style="flex:1; padding:10px 10px; border:1px solid var(--border); border-radius:12px; outline:none"
+               value="http://192.168.2.13:8888/cam" />
+        <button id="camApply" class="tabbtn" style="border-radius:12px;">Load</button>
+        <span class="badge">Status: <span id="camStatus">loading…</span></span>
+      </div>
+
+      <div style="flex:1; padding:14px;">
+        <div class="videoWrap">
+          <div class="videoHud">Live camera</div>
+          <iframe id="camFrame" title="Live camera"></iframe>
+          <img id="camImg" alt="Live camera feed" style="display:none"/>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <script src="./app.js"></script>
+</body>
+</html>

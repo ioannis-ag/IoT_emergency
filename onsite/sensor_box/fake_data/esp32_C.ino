@@ -4,35 +4,49 @@
 #include <time.h>
 #include <math.h>
 
-// ===================== IDENTITY =====================
-static constexpr char NODE_ID_CHAR = 'C';
-static const char* NODE_ID         = "C";
-static const char* TEAM_ID         = "Team_A";
-static const char* FIREFIGHTER_ID  = "FF_C";
+#include "ecg_segment_ff_c.h"
 
-// ===================== WIFI  =====================
+// Identity
+static constexpr char NODE_ID_CHAR = 'C';
+static const char*    NODE_ID      = "C";
+static const char*    TEAM_ID      = "Team_A";
+static const char*    FIREFIGHTER_ID = "FF_C";
+
+// Wi-Fi credentials rotation
 struct WifiCred { const char* ssid; const char* pass; };
 static WifiCred WIFI_LIST[] = {
   { "VODAFONE_H268Q-4057", "SFzDE5ZxHyQPQ2FQ" },
-  { "FirefighterA",        "firefighterA" },
+  { "FirefighterA",        "firefighterA"     },
 };
 static constexpr int WIFI_LIST_N = sizeof(WIFI_LIST) / sizeof(WIFI_LIST[0]);
 
-// ===================== MQTT  =====================
+// MQTT
 static const char* MQTT_HOST = "192.168.2.13";
 static const int   MQTT_PORT = 1883;
 
-// Topics 
+// Topics
 static String TOPIC_ENV = String("ngsi/Environment/") + TEAM_ID + "/" + FIREFIGHTER_ID;
 static String TOPIC_BIO = String("ngsi/Biomedical/")  + TEAM_ID + "/" + FIREFIGHTER_ID;
 static String TOPIC_GW  = String("ngsi/Gateway/")     + NODE_ID;
+static String TOPIC_ECG = String("raw/ECG/")          + TEAM_ID + "/" + FIREFIGHTER_ID;
 
-// ===================== TIMING =====================
-static const uint32_t PUB_INTERVAL_MS = 2000;
-static const uint32_t MQTT_RETRY_MS   = 2000;
+// Multi-rate publishing
+static const uint32_t ENV_INTERVAL_MS = 2000;
+static const uint32_t BIO_INTERVAL_MS = 1000;
+static const uint32_t GW_INTERVAL_MS  = 5000;
+
+// ECG replay
+static const uint32_t ECG_REPLAY_PUB_MS = 50;
+static const uint16_t ECG_REPLAY_SAMPLES_PER_BUNDLE = 20;
+static bool     replayActive = false;
+static uint32_t replayEndMs  = 0;
+static uint32_t replayIdx    = 0;
+
+// Connectivity timing
+static const uint32_t MQTT_RETRY_MS          = 2000;
 static const uint32_t WIFI_ATTEMPT_WINDOW_MS = 15000;
 
-// ===================== GLOBALS =====================
+// Globals
 static WiFiClient wifiClient;
 static PubSubClient mqtt(wifiClient);
 
@@ -40,53 +54,54 @@ static volatile bool wifiGotIp = false;
 static volatile bool wifiConnecting = false;
 static int wifiIndex = -1;
 static uint32_t wifiAttemptStart = 0;
-static uint32_t lastMqttTry = 0;
-static uint32_t lastPub = 0;
 
+static uint32_t lastMqttTry = 0;
+static uint32_t lastEnv = 0;
+static uint32_t lastBio = 0;
+static uint32_t lastGw  = 0;
+static uint32_t lastEcg = 0;
+
+// Time (UTC via NTP)
 static bool timeInited = false;
 static uint32_t lastTimeTry = 0;
 
-// ===================== SIM STATE =====================
-struct Incident {
-  bool active = false;
-  uint32_t untilMs = 0;
-  float intensity = 0;  // 0..1
-};
-static Incident incHeat, incSmoke, incCO, incTachy, incWearableDrop, incStale;
+// Demo timeline
+static uint32_t demoT0 = 0;
 
-static float tempBase = 33.0f;   // room+gear heat
-static float humBase  = 35.0f;
-static float coBase   = 5.0f;    // ppm baseline
-static int   mq2Base  = 900;     // "clean air" raw baseline (tunable)
-static int   hrBase   = 105;     // active working HR baseline
-static int   rrBaseMs = 600;     // ~100 bpm
-
-static float tempRW = 0.0f, humRW = 0.0f, coRW = 0.0f;
-static float hrRW   = 0.0f;
-static float mq2RW  = 0.0f;
-
+// Backend-friendly state
+static int   batteryPct  = 94;
+static float motionLevel = 0.45f;
+static const char* activity = "walk";
+static float stressIndex = 0.25f;
 static bool wearableOk = true;
 
-// ===================== HELPERS =====================
+static uint32_t incidentId = 0;
+static const char* incidentType = "none";
+static const char* incidentSeverity = "info";
+static bool incidentActive = false;
+static int incidentTtlSec = 0;
+
+// Math helpers
+static float frand(float a, float b) { return a + (b - a) * (float)random(0, 10000) / 10000.0f; }
+static float clampf(float x, float lo, float hi) { return (x < lo) ? lo : (x > hi) ? hi : x; }
+static int   clampi(int x, int lo, int hi) { return (x < lo) ? lo : (x > hi) ? hi : x; }
+
+// Wi-Fi RSSI helper
 static inline int16_t wifiRssiDbmOrNeg127() {
   return (WiFi.status() == WL_CONNECTED) ? (int16_t)WiFi.RSSI() : (int16_t)-127;
 }
 
+// UTC time helpers
 static void ensureTimeUtc() {
   if (timeInited) return;
   if (WiFi.status() != WL_CONNECTED) return;
-
   uint32_t now = millis();
   if (now - lastTimeTry < 10000) return;
   lastTimeTry = now;
-
   configTime(0, 0, "pool.ntp.org", "time.google.com", "time.cloudflare.com");
   time_t t = time(nullptr);
-  if (t > 1700000000) {
-    timeInited = true;
-  }
+  if (t > 1700000000) timeInited = true;
 }
-
 static void iso8601UtcNow(char* out, size_t outSz) {
   time_t t = time(nullptr);
   if (t <= 100000) { snprintf(out, outSz, "1970-01-01T00:00:00Z"); return; }
@@ -95,70 +110,29 @@ static void iso8601UtcNow(char* out, size_t outSz) {
   strftime(out, outSz, "%Y-%m-%dT%H:%M:%SZ", &tm);
 }
 
-static float clampf(float x, float a, float b) { return (x < a) ? a : (x > b) ? b : x; }
-static int clampi(int x, int a, int b) { return (x < a) ? a : (x > b) ? b : x; }
-
-static float frand(float a, float b) {
-  return a + (b - a) * (float)random(0, 10000) / 10000.0f;
-}
-
-static void maybeStartIncident(Incident& inc, float chancePerPub, uint32_t minDurMs, uint32_t maxDurMs) {
-  if (inc.active) return;
-  // chancePerPub ~ probability each publish tick
-  if (frand(0, 1) < chancePerPub) {
-    inc.active = true;
-    inc.untilMs = millis() + (uint32_t)random(minDurMs, maxDurMs);
-    inc.intensity = frand(0.4f, 1.0f);
-  }
-}
-
-static void updateIncident(Incident& inc) {
-  if (!inc.active) return;
-  if ((int32_t)(millis() - inc.untilMs) >= 0) {
-    inc.active = false;
-    inc.intensity = 0;
-  }
-}
-
-// ===================== WIFI (event-driven) =====================
+// Wi-Fi event-driven state
 static void onWiFiEvent(WiFiEvent_t event) {
   switch (event) {
-    case ARDUINO_EVENT_WIFI_STA_START:
-      wifiConnecting = true;
-      break;
-    case ARDUINO_EVENT_WIFI_STA_GOT_IP:
-      wifiGotIp = true;
-      wifiConnecting = false;
-      break;
-    case ARDUINO_EVENT_WIFI_STA_DISCONNECTED:
-      wifiGotIp = false;
-      wifiConnecting = false;
-      break;
-    default:
-      break;
+    case ARDUINO_EVENT_WIFI_STA_START:          wifiConnecting = true; break;
+    case ARDUINO_EVENT_WIFI_STA_GOT_IP:         wifiGotIp = true; wifiConnecting = false; break;
+    case ARDUINO_EVENT_WIFI_STA_DISCONNECTED:   wifiGotIp = false; wifiConnecting = false; break;
+    default: break;
   }
 }
-
 static void startNextWifiAttempt() {
   wifiIndex = (wifiIndex + 1) % WIFI_LIST_N;
   wifiAttemptStart = millis();
-
   WiFi.disconnect(true);
   delay(50);
   WiFi.begin(WIFI_LIST[wifiIndex].ssid, WIFI_LIST[wifiIndex].pass);
 }
-
 static void ensureWiFi() {
   if (wifiGotIp) return;
-
   if (wifiConnecting && (millis() - wifiAttemptStart) < WIFI_ATTEMPT_WINDOW_MS) return;
-
-  if (wifiAttemptStart == 0 || (millis() - wifiAttemptStart) >= WIFI_ATTEMPT_WINDOW_MS) {
-    startNextWifiAttempt();
-  }
+  if (wifiAttemptStart == 0 || (millis() - wifiAttemptStart) >= WIFI_ATTEMPT_WINDOW_MS) startNextWifiAttempt();
 }
 
-// ===================== MQTT =====================
+// MQTT reconnect
 static void ensureMQTT() {
   if (mqtt.connected()) return;
   if (WiFi.status() != WL_CONNECTED) return;
@@ -170,7 +144,7 @@ static void ensureMQTT() {
   mqtt.setServer(MQTT_HOST, MQTT_PORT);
 
   uint64_t mac = ESP.getEfuseMac();
-  char cid[64];
+  char cid[80];
   snprintf(cid, sizeof(cid), "sim-%s-%s-node%c-%06lX%06lX",
            TEAM_ID, FIREFIGHTER_ID, NODE_ID_CHAR,
            (unsigned long)(mac >> 24), (unsigned long)(mac & 0xFFFFFF));
@@ -178,97 +152,185 @@ static void ensureMQTT() {
   mqtt.connect(cid);
 }
 
-// ===================== REALISTIC SIGNAL GENERATORS =====================
-static void randomWalkStep(float& rw, float step, float limitAbs) {
-  rw += frand(-step, step);
-  rw = clampf(rw, -limitAbs, limitAbs);
+// ECG replay control
+static void startEcgReplay(uint32_t nowMs, uint32_t durationMs) {
+  replayActive = true;
+  replayEndMs = nowMs + durationMs;
+  replayIdx = 0;
+}
+static void stopEcgReplay() { replayActive = false; }
+
+static void publishReplayBundle(uint32_t nowMs, int hrBpm, float stress) {
+  if (!mqtt.connected()) return;
+  if (!replayActive) return;
+
+  if ((int32_t)(nowMs - replayEndMs) >= 0) { stopEcgReplay(); return; }
+
+  const uint16_t n = ECG_REPLAY_SAMPLES_PER_BUNDLE;
+  uint8_t buf[4 + 4 + 2 + 2 + 1 + (n * 2)];
+  uint16_t p = 0;
+
+  buf[p++] = 'E'; buf[p++] = 'C'; buf[p++] = 'G'; buf[p++] = '1';
+
+  uint32_t ms = nowMs;
+  buf[p++] = (uint8_t)(ms & 0xFF);
+  buf[p++] = (uint8_t)((ms >> 8) & 0xFF);
+  buf[p++] = (uint8_t)((ms >> 16) & 0xFF);
+  buf[p++] = (uint8_t)((ms >> 24) & 0xFF);
+
+  buf[p++] = (uint8_t)(n & 0xFF);
+  buf[p++] = (uint8_t)((n >> 8) & 0xFF);
+
+  uint16_t hr = (uint16_t)clampi(hrBpm, 0, 250);
+  buf[p++] = (uint8_t)(hr & 0xFF);
+  buf[p++] = (uint8_t)((hr >> 8) & 0xFF);
+
+  uint8_t st = (uint8_t)clampi((int)lround(clampf(stress, 0.0f, 1.0f) * 255.0f), 0, 255);
+  buf[p++] = st;
+
+  for (uint16_t i = 0; i < n; i++) {
+    int16_t s = ECG_SEGMENT_DATA[replayIdx++];
+    if (replayIdx >= ECG_SEGMENT_LEN) replayIdx = 0;
+    buf[p++] = (uint8_t)(s & 0xFF);
+    buf[p++] = (uint8_t)((s >> 8) & 0xFF);
+  }
+
+  mqtt.publish(TOPIC_ECG.c_str(), buf, p);
 }
 
-static void synthTick(float& outTempC, float& outHumPct, int& outMq2Raw, float& outCoPpm,
-                      int& outHrBpm, int& outRrMs) {
-  // Update incidents (start chances tuned to feel “rare but real”)
-  maybeStartIncident(incHeat,         0.010f, 15000, 60000);   // ~1% per publish
-  maybeStartIncident(incSmoke,        0.012f, 15000, 70000);
-  maybeStartIncident(incCO,           0.008f, 15000, 60000);
-  maybeStartIncident(incTachy,        0.010f, 12000, 50000);
-  maybeStartIncident(incWearableDrop, 0.006f,  8000, 25000);
-  maybeStartIncident(incStale,        0.004f, 20000, 60000);   // offline simulation
+// Smooth ramp helper for demo phases
+static float smoothstep(float x) {
+  x = clampf(x, 0.0f, 1.0f);
+  return x * x * (3.0f - 2.0f * x);
+}
 
-  updateIncident(incHeat);
-  updateIncident(incSmoke);
-  updateIncident(incCO);
-  updateIncident(incTachy);
-  updateIncident(incWearableDrop);
-  updateIncident(incStale);
+// Update motion/activity/battery slowly for realism
+static void updateKinematics(uint32_t nowMs) {
+  float t = nowMs / 1000.0f;
+  float base = 0.45f + 0.18f * sinf(t * 0.05f + 0.8f);
+  motionLevel = clampf(base + frand(-0.06f, 0.06f), 0.05f, 1.0f);
 
-  // Random walks (slow drift)
-  randomWalkStep(tempRW, 0.08f, 3.0f);
-  randomWalkStep(humRW,  0.15f, 8.0f);
-  randomWalkStep(coRW,   0.40f, 8.0f);
-  randomWalkStep(hrRW,   0.60f, 25.0f);
-  randomWalkStep(mq2RW,  20.0f, 600.0f);
+  if (motionLevel < 0.22f) activity = "still";
+  else if (motionLevel < 0.62f) activity = "walk";
+  else activity = "run";
 
-  float t = millis() / 1000.0f;
+  if ((nowMs % 7000) < 20) {
+    int drop = (int)random(0, 2);
+    batteryPct = clampi(batteryPct - drop, 20, 100);
+  }
+}
 
-  // Base oscillations (breathing/effort cycles)
-  float temp = tempBase + tempRW + 1.2f * sinf(t * 0.07f);
-  float hum  = humBase  + humRW  + 3.0f * sinf(t * 0.05f + 1.2f);
-  float co   = coBase   + coRW   + 1.0f * sinf(t * 0.09f + 0.6f);
-  float mq2  = (float)mq2Base + mq2RW + 60.0f * sinf(t * 0.06f);
+// Demo phase synthesis
+static void synthDemoSignals(uint32_t nowMs,
+                             float& outTempC, float& outHumPct, int& outMq2Raw, float& outCoPpm,
+                             int& outHrBpm, int& outRrMs) {
+  uint32_t tms = nowMs - demoT0;
+  float t = tms / 1000.0f;
 
-  float hr   = (float)hrBase + hrRW + 8.0f * sinf(t * 0.20f);
-  float rrMs = 60000.0f / clampf(hr, 55.0f, 200.0f);
+  float baseTemp = 38.0f + 1.3f * sinf(t * 0.05f);
+  float baseHum  = 34.0f + 2.0f * sinf(t * 0.04f + 1.1f);
+  float baseCo   = 6.0f  + 1.0f * sinf(t * 0.07f + 0.3f);
+  float baseMq2  = 950.0f + 60.0f * sinf(t * 0.06f + 0.2f);
+  float baseHr   = 120.0f + 7.0f * sinf(t * 0.20f + 0.9f);
 
-  // Apply incidents with ramps
-  if (incHeat.active)  temp += 25.0f * incHeat.intensity;             // can exceed 60
-  if (incSmoke.active) mq2  += 1900.0f * incSmoke.intensity;          // can exceed 2600
-  if (incCO.active)    co   += 140.0f * incCO.intensity;              // can exceed 100
-  if (incTachy.active) hr   += 95.0f * incTachy.intensity;            // can exceed 180
-  wearableOk = !incWearableDrop.active;
+  float worsen = 0.0f;
+  float danger = 0.0f;
+  float recover = 0.0f;
 
-  // Clip to plausible ranges
-  temp = clampf(temp, 18.0f, 95.0f);
-  hum  = clampf(hum,  10.0f, 90.0f);
-  co   = clampf(co,    0.0f, 250.0f);
-  mq2  = clampf(mq2,  200.0f, 4095.0f);
-  hr   = clampf(hr,   45.0f, 210.0f);
+  if (tms < 60000) {
+    worsen = 0.0f;
+    danger = 0.0f;
+    recover = 0.0f;
+  } else if (tms < 90000) {
+    worsen = smoothstep((tms - 60000) / 30000.0f);
+    danger = 0.0f;
+    recover = 0.0f;
+  } else if (tms < 210000) {
+    worsen = 1.0f;
+    danger = smoothstep((tms - 90000) / 120000.0f);
+    recover = 0.0f;
+  } else {
+    worsen = 1.0f;
+    danger = 1.0f;
+    recover = smoothstep((tms - 210000) / 90000.0f);
+  }
 
-  // Add small measurement noise
+  float temp = baseTemp + 9.0f * worsen + 20.0f * danger - 18.0f * recover;
+  float hum  = baseHum  - 2.0f * worsen - 6.0f  * danger + 5.0f  * recover;
+
+  float mq2  = baseMq2 + 1050.0f * worsen + 1900.0f * danger - 1800.0f * recover;
+  float co   = baseCo  + 16.0f   * worsen + 130.0f  * danger - 120.0f  * recover;
+
+  float hr   = baseHr  + 25.0f   * worsen + 75.0f   * danger - 70.0f   * recover;
+
   temp += frand(-0.15f, 0.15f);
   hum  += frand(-0.35f, 0.35f);
-  co   += frand(-0.8f,  0.8f);
-  hr   += frand(-1.5f,  1.5f);
+  mq2  += frand(-25.0f, 25.0f);
+  co   += frand(-0.8f, 0.8f);
+  hr   += frand(-1.2f, 1.2f);
+
+  temp = clampf(temp, 25.0f, 90.0f);
+  hum  = clampf(hum,  8.0f,  90.0f);
+  mq2  = clampf(mq2,  200.0f, 4095.0f);
+  co   = clampf(co,   0.0f,  260.0f);
+  hr   = clampf(hr,   60.0f, 210.0f);
+
+  float stress = 0.18f + 0.35f * worsen + 0.75f * danger - 0.70f * recover;
+  stress += 0.10f * (motionLevel > 0.65f ? 1.0f : 0.0f);
+  stressIndex = clampf(stress + frand(-0.03f, 0.03f), 0.0f, 1.0f);
+
+  float rr = 60000.0f / clampf(hr, 55.0f, 200.0f);
+  float hrvJitter = (1.0f - stressIndex) * frand(-16.0f, 16.0f) + frand(-6.0f, 6.0f);
+  rr = clampf(rr + hrvJitter, 260.0f, 1300.0f);
 
   outTempC = temp;
   outHumPct = hum;
-  outCoPpm = co;
   outMq2Raw = (int)lround(mq2);
+  outCoPpm = co;
   outHrBpm = (int)lround(hr);
-  outRrMs  = (int)lround(60000.0f / clampf(hr, 55.0f, 200.0f));
+  outRrMs = (int)lround(rr);
+
+  if (tms < 60000) {
+    incidentActive = false;
+    incidentType = "none";
+    incidentSeverity = "info";
+    incidentTtlSec = 0;
+  } else if (tms < 90000) {
+    incidentActive = true;
+    incidentType = "smoke_co";
+    incidentSeverity = "warn";
+    incidentTtlSec = (int)((90000 - tms) / 1000);
+  } else if (tms < 210000) {
+    incidentActive = true;
+    incidentType = "smoke_co";
+    incidentSeverity = "danger";
+    incidentTtlSec = (int)((210000 - tms) / 1000);
+  } else {
+    incidentActive = true;
+    incidentType = "recovery";
+    incidentSeverity = "info";
+    incidentTtlSec = 0;
+  }
 }
 
-// ===================== PUBLISHERS =====================
-static void publishAll() {
+// Publish JSON Environment
+static void publishEnv(uint32_t nowMs,
+                       float tempC, float humPct, int mq2Raw, float coPpm,
+                       int hrBpm) {
   if (!mqtt.connected()) return;
 
   ensureTimeUtc();
   char ts[32];
   iso8601UtcNow(ts, sizeof(ts));
 
-  // If “stale incident” active: simulate radio silence (edge should raise delayed/offline)
-  if (incStale.active) return;
-
-  float tempC, humPct, coPpm;
-  int mq2Raw, hrBpm, rrMs;
-  synthTick(tempC, humPct, mq2Raw, coPpm, hrBpm, rrMs);
-
   char tbuf[16], hbuf[16], cobuf[16];
   dtostrf(tempC, 0, 2, tbuf);
-  dtostrf(humPct,0, 2, hbuf);
-  dtostrf(coPpm, 0, 1, cobuf);
+  dtostrf(humPct, 0, 2, hbuf);
+  dtostrf(coPpm,  0, 1, cobuf);
 
-  // ENV
-  char env[560];
+  int mq2Dig = (mq2Raw > 1800) ? 1 : 0;
+
+  char env[900];
   snprintf(env, sizeof(env),
     "{"
       "\"teamId\":\"%s\",\"ffId\":\"%s\",\"nodeId\":\"%s\","
@@ -278,19 +340,38 @@ static void publishAll() {
       "\"mq2Raw\":%d,\"mq2Digital\":%d,"
       "\"coPpm\":%s,"
       "\"wifiRssiDbm\":%d,"
+      "\"batteryPct\":%d,"
+      "\"activity\":\"%s\",\"motionLevel\":%.2f,"
+      "\"incidentActive\":%s,\"incidentType\":\"%s\",\"incidentId\":%lu,\"incidentSeverity\":\"%s\",\"incidentTtlSec\":%d,"
+      "\"stressIndex\":%.2f,"
+      "\"hrBpmHint\":%d,"
       "\"source\":\"sim\""
     "}",
     TEAM_ID, FIREFIGHTER_ID, NODE_ID,
     NODE_ID, ts,
     tbuf, hbuf,
-    mq2Raw, (mq2Raw > 1800) ? 1 : 0,
+    mq2Raw, mq2Dig,
     cobuf,
-    (int)wifiRssiDbmOrNeg127()
+    (int)wifiRssiDbmOrNeg127(),
+    batteryPct,
+    activity, (double)motionLevel,
+    incidentActive ? "true" : "false", incidentType, (unsigned long)incidentId, incidentSeverity, incidentTtlSec,
+    (double)stressIndex,
+    hrBpm
   );
-  mqtt.publish(TOPIC_ENV.c_str(), env);
 
-  // BIO
-  char bio[420];
+  mqtt.publish(TOPIC_ENV.c_str(), env);
+}
+
+// Publish JSON Biomedical
+static void publishBio(uint32_t nowMs, int hrBpm, int rrMs) {
+  if (!mqtt.connected()) return;
+
+  ensureTimeUtc();
+  char ts[32];
+  iso8601UtcNow(ts, sizeof(ts));
+
+  char bio[700];
   snprintf(bio, sizeof(bio),
     "{"
       "\"teamId\":\"%s\",\"ffId\":\"%s\","
@@ -298,35 +379,54 @@ static void publishAll() {
       "\"observedAt\":\"%s\","
       "\"hrBpm\":%d,\"rrMs\":%d,"
       "\"wearableOk\":%s,"
+      "\"stressIndex\":%.2f,"
+      "\"activity\":\"%s\",\"motionLevel\":%.2f,"
+      "\"incidentActive\":%s,\"incidentType\":\"%s\",\"incidentId\":%lu,\"incidentSeverity\":\"%s\",\"incidentTtlSec\":%d,"
       "\"source\":\"sim\""
     "}",
     TEAM_ID, FIREFIGHTER_ID,
     NODE_ID, ts,
     hrBpm, rrMs,
-    wearableOk ? "true" : "false"
+    wearableOk ? "true" : "false",
+    (double)stressIndex,
+    activity, (double)motionLevel,
+    incidentActive ? "true" : "false", incidentType, (unsigned long)incidentId, incidentSeverity, incidentTtlSec
   );
-  mqtt.publish(TOPIC_BIO.c_str(), bio);
 
-  // GW
+  mqtt.publish(TOPIC_BIO.c_str(), bio);
+}
+
+// Publish JSON Gateway
+static void publishGw(uint32_t nowMs) {
+  if (!mqtt.connected()) return;
+
+  ensureTimeUtc();
+  char ts[32];
+  iso8601UtcNow(ts, sizeof(ts));
+
   bool uplink_ok = (WiFi.status() == WL_CONNECTED && mqtt.connected());
-  char gw[320];
+
+  char gw[520];
   snprintf(gw, sizeof(gw),
     "{"
       "\"nodeId\":\"%s\",\"observedAt\":\"%s\","
       "\"uplinkReal\":%s,\"uplinkEffective\":%s,"
       "\"wifiRssiDbm\":%d,"
-      "\"bleOk\":true,\"ecgOn\":false,"
+      "\"bleOk\":%s,\"ecgOn\":%s,"
       "\"ecgPkts\":0,\"ecgDrop\":0"
     "}",
     NODE_ID, ts,
     uplink_ok ? "true" : "false",
     uplink_ok ? "true" : "false",
-    (int)wifiRssiDbmOrNeg127()
+    (int)wifiRssiDbmOrNeg127(),
+    wearableOk ? "true" : "false",
+    replayActive ? "true" : "false"
   );
+
   mqtt.publish(TOPIC_GW.c_str(), gw);
 }
 
-// ===================== SETUP / LOOP =====================
+// Setup / loop
 void setup() {
   Serial.begin(115200);
   delay(100);
@@ -340,6 +440,9 @@ void setup() {
   mqtt.setServer(MQTT_HOST, MQTT_PORT);
   mqtt.setBufferSize(1024);
 
+  incidentId = (uint32_t)random(100000, 999999);
+  demoT0 = millis();
+
   startNextWifiAttempt();
 }
 
@@ -348,12 +451,44 @@ void loop() {
   ensureMQTT();
   mqtt.loop();
 
-  uint32_t now = millis();
-  if (WiFi.status() == WL_CONNECTED && mqtt.connected()) {
-    if (now - lastPub >= PUB_INTERVAL_MS) {
-      lastPub = now;
-      publishAll();
-    }
+  if (WiFi.status() != WL_CONNECTED || !mqtt.connected()) {
+    delay(2);
+    return;
+  }
+
+  uint32_t nowMs = millis();
+  updateKinematics(nowMs);
+
+  float tempC, humPct, coPpm;
+  int mq2Raw, hrBpm, rrMs;
+  synthDemoSignals(nowMs, tempC, humPct, mq2Raw, coPpm, hrBpm, rrMs);
+
+  uint32_t tms = nowMs - demoT0;
+
+  if (tms >= 90000 && tms < 210000) {
+    if (!replayActive) startEcgReplay(nowMs, 120000);
+  } else {
+    if (replayActive && tms >= 210000) stopEcgReplay();
+  }
+
+  if (nowMs - lastBio >= BIO_INTERVAL_MS) {
+    lastBio = nowMs;
+    publishBio(nowMs, hrBpm, rrMs);
+  }
+
+  if (nowMs - lastEnv >= ENV_INTERVAL_MS) {
+    lastEnv = nowMs;
+    publishEnv(nowMs, tempC, humPct, mq2Raw, coPpm, hrBpm);
+  }
+
+  if (nowMs - lastGw >= GW_INTERVAL_MS) {
+    lastGw = nowMs;
+    publishGw(nowMs);
+  }
+
+  if (replayActive && (nowMs - lastEcg >= ECG_REPLAY_PUB_MS)) {
+    lastEcg = nowMs;
+    publishReplayBundle(nowMs, hrBpm, stressIndex);
   }
 
   delay(2);

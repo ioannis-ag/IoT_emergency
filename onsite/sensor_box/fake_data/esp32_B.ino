@@ -36,7 +36,7 @@ static const uint32_t GW_INTERVAL_MS  = 5000;
 
 // ---------------- Synthetic ECG (binary) ----------------
 static const bool     ENABLE_FAKE_ECG      = true;
-static const uint32_t ECG_PUB_INTERVAL_MS  = 50;     // publish small bundles frequently
+static const uint32_t ECG_PUB_INTERVAL_MS  = 154;     // publish small bundles frequently
 static const int      ECG_HZ               = 130;    // conceptual sampling rate for waveform generation
 static const int      ECG_SAMPLES_PER_BUNDLE = 20;   // samples packed into each MQTT message (keeps payload small)
 

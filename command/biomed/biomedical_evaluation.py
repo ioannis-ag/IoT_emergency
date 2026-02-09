@@ -75,6 +75,17 @@ def topic_to_team_ff(topic: str) -> Optional[Tuple[str, str]]:
     return None
 
 # ---------------- Decoding: ECG1 bundle + Polar PMD ECG ----------------
+
+def parse_team_ff(topic: str):
+    parts = topic.split("/")
+    # raw/ECG/Team_A/FF_B
+    if len(parts) >= 4 and parts[0] == "raw" and parts[1] == "ECG":
+        return parts[2], parts[3]
+    # ngsi/Biomedical/Team_A/FF_B
+    if len(parts) >= 4 and parts[0] == "ngsi":
+        return parts[2], parts[3]
+    return None
+
 def parse_ecg1_simple(payload: bytes):
     """
     Simple ESP32 format:

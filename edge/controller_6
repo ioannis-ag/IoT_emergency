@@ -1,0 +1,616 @@
+#!/usr/bin/env python3
+import json
+import logging
+import math
+import random
+import threading
+import time
+from datetime import datetime, timezone
+from typing import Any, Dict, Tuple, List, Optional
+
+import paho.mqtt.client as mqtt
+import requests
+
+# =========================================================
+# CONFIG
+# =========================================================
+MQTT_BROKER_HOST = "localhost"
+MQTT_BROKER_PORT = 1883
+
+MQTT_TOPICS = [
+    ("ngsi/Environment/+/+", 0),
+    ("ngsi/Biomedical/+/+", 0),
+    ("ngsi/Location/+/+", 0),
+    ("ngsi/Gateway/+", 0),
+    ("raw/ECG/+/+", 0),
+]
+
+ORION_URL = "http://192.168.2.12:1026/v2/op/update"
+ORION_TIMEOUT = 5
+
+TEAM_ID = "Team_A"
+REAL_FF_ID = "FF_A"
+
+STATUS_TOPIC_PREFIX = "edge/status"
+ALERTS_TOPIC_PREFIX = "edge/alerts"
+
+FALLBACK_LAT = 38.2466
+FALLBACK_LON = 21.7346
+
+FAKE_LOC_ACCURACY_M = 6
+FAKE_LOC_HZ = 1.0
+
+# Bubble radii (meters)
+BUBBLE_NEAR_MIN_M = 12.0
+BUBBLE_NEAR_MAX_M = 35.0
+
+# Crisis unit (C) drifts out smoothly
+CRISIS_MIN_M = 70.0
+CRISIS_TARGET_M = 125.0
+CRISIS_MAX_M = 165.0
+
+# Human movement limits (walking / brisk)
+MAX_SPEED_MPS = 1.35      # ~4.9 km/h
+MAX_ACCEL_MPS2 = 0.35
+
+# Alert behavior: calmer, less spam
+PERSIST_SEC = 6.0
+ALERT_COOLDOWN_SEC = 35.0
+ESCALATION_BYPASS_SEC = 8.0  # if escalates to danger, allow sooner publish
+
+FF_NAMES = {
+    "FF_A": "Alex (Leader)",
+    "FF_B": "Maria",
+    "FF_C": "Nikos (Crisis)",
+    "FF_D": "Eleni",
+}
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+
+# =========================================================
+# ORION HARD FILTER
+# =========================================================
+ORION_ALLOWED_ATTRS = {
+    "lat", "lon", "accuracyM",
+    "tempC", "humidityPct", "mq2Raw", "mq2Digital", "coPpm",
+    "hrBpm", "wearableOk",
+    "rssi", "battery", "failover", "via",
+    "observedAt", "timestamp", "tst",
+}
+
+def filter_orion_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
+    clean = {}
+    for k, v in payload.items():
+        if k not in ORION_ALLOWED_ATTRS:
+            continue
+        if v is None:
+            continue
+        if isinstance(v, (list, dict)):
+            continue
+        if isinstance(v, (int, float)):
+            if not math.isfinite(float(v)):
+                continue
+            clean[k] = v
+            continue
+        if isinstance(v, str):
+            s = "".join(ch for ch in v if ch.isprintable()).strip()
+            if s:
+                clean[k] = s
+    return clean
+
+def ngsi_type(v):
+    if isinstance(v, bool):
+        return "Boolean"
+    if isinstance(v, (int, float)):
+        return "Number"
+    return "Text"
+
+def build_ngsi_entity(eid: str, etype: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+    ent = {"id": eid, "type": etype}
+    for k, v in payload.items():
+        ent[k] = {"type": ngsi_type(v), "value": v}
+    ent["timestamp"] = {"type": "Number", "value": int(time.time())}
+    return ent
+
+def send_to_orion(entity: Dict[str, Any]):
+    try:
+        r = requests.post(
+            ORION_URL,
+            json={"actionType": "append", "entities": [entity]},
+            timeout=ORION_TIMEOUT,
+        )
+        if r.status_code not in (200, 201, 204):
+            logging.warning("Orion %s: %s", r.status_code, r.text[:200])
+    except Exception as e:
+        logging.error("Orion error: %s", e)
+
+def topic_to_entity(topic: str):
+    p = topic.split("/")
+    if len(p) == 4 and p[0] == "ngsi":
+        _, kind, team, ff = p
+        if kind == "Environment":
+            return f"EnvNode:{team}:{ff}", "Environment", team, ff
+        if kind == "Biomedical":
+            return f"Wearable:{team}:{ff}", "Biomedical", team, ff
+        if kind == "Location":
+            return f"Phone:{team}:{ff}", "Location", team, ff
+    if len(p) == 3 and p[1] == "Gateway":
+        return f"Gateway:{p[2]}", "Gateway", None, p[2]
+    return None, None, None, None
+
+# =========================================================
+# STATE
+# =========================================================
+last_loc: Dict[Tuple[str, str], Dict[str, Any]] = {}
+last_env: Dict[Tuple[str, str], Dict[str, Any]] = {}
+last_bio: Dict[Tuple[str, str], Dict[str, Any]] = {}
+last_seen: Dict[Tuple[str, str], float] = {}
+
+# Alert de-bounce + cooldown
+_cond_start: Dict[Tuple[str, str, str], float] = {}     # (team, ff, key) -> first time condition true
+_last_alert_sig: Dict[Tuple[str, str], str] = {}        # (team, ff) -> signature
+_last_alert_ts: Dict[Tuple[str, str], float] = {}       # (team, ff) -> time last published
+
+def nowz() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+def haversine_m(lat1, lon1, lat2, lon2) -> float:
+    R = 6371000.0
+    p1, p2 = math.radians(lat1), math.radians(lat2)
+    dphi = math.radians(lat2 - lat1)
+    dl = math.radians(lon2 - lon1)
+    a = math.sin(dphi/2)**2 + math.cos(p1)*math.cos(p2)*math.sin(dl/2)**2
+    return 2*R*math.asin(math.sqrt(a))
+
+# =========================================================
+# UI SUMMARY (matches front-end expectations)
+# =========================================================
+def _severity_rank(s: str) -> int:
+    return {"ok": 0, "warn": 1, "danger": 2}.get(s, 0)
+
+def build_ui_summary(team: str, ff: str):
+    key = (team, ff)
+    loc = last_loc.get(key, {})
+    env = last_env.get(key, {})
+    bio = last_bio.get(key, {})
+
+    lat = loc.get("lat")
+    lon = loc.get("lon")
+    acc = loc.get("accuracyM")
+
+    hr = bio.get("hrBpm")
+    temp = env.get("tempC")
+    mq2 = env.get("mq2Raw")
+
+    now = time.time()
+    seen = last_seen.get(key)
+    last_seen_sec = int(now - seen) if seen else None
+
+    # ---- Pulse levels ----
+    pulse_level = pulse_hint = "—"
+    if isinstance(hr, (int, float)):
+        hr_i = int(hr)
+        if hr_i < 130:
+            pulse_level, pulse_hint = "Normal", f"{hr_i} bpm"
+        elif hr_i < 160:
+            pulse_level, pulse_hint = "Elevated", f"{hr_i} bpm"
+        elif hr_i < 180:
+            pulse_level, pulse_hint = "High", f"{hr_i} bpm"
+        else:
+            pulse_level, pulse_hint = "Critical", f"{hr_i} bpm"
+
+    # ---- Heat levels ----
+    heat_level = heat_hint = "—"
+    if isinstance(temp, (int, float)):
+        t = float(temp)
+        if t < 45:
+            heat_level, heat_hint = "OK", f"{t:.1f} °C"
+        elif t < 50:
+            heat_level, heat_hint = "Warm", f"{t:.1f} °C"
+        elif t < 60:
+            heat_level, heat_hint = "Hot", f"{t:.1f} °C"
+        else:
+            heat_level, heat_hint = "Danger", f"{t:.1f} °C"
+
+    # ---- Smoke levels ----
+    smoke_level = smoke_hint = "—"
+    if isinstance(mq2, (int, float)):
+        m = int(mq2)
+        if m < 1800:
+            smoke_level, smoke_hint = "Low", str(m)
+        elif m < 2600:
+            smoke_level, smoke_hint = "Moderate", str(m)
+        elif m < 3200:
+            smoke_level, smoke_hint = "High", str(m)
+        else:
+            smoke_level, smoke_hint = "Extreme", str(m)
+
+    # ---- Distance to leader ----
+    dist = None
+    anchor = last_loc.get((team, REAL_FF_ID), {})
+    al, ao = anchor.get("lat"), anchor.get("lon")
+    if all(isinstance(x, (int, float)) for x in (lat, lon, al, ao)):
+        dist = haversine_m(lat, lon, al, ao)
+
+    # ---- Determine severity (for marker color) ----
+    severity = "ok"
+    if pulse_level in ("High", "Critical") or heat_level in ("Hot", "Danger") or smoke_level in ("High", "Extreme"):
+        severity = "warn"
+    if pulse_level == "Critical" or heat_level == "Danger" or smoke_level == "Extreme":
+        severity = "danger"
+
+    # Location separation influences severity a bit (but calm)
+    if isinstance(dist, (int, float)):
+        if dist >= 140:
+            severity = "danger"
+        elif dist >= 90 and _severity_rank(severity) < _severity_rank("warn"):
+            severity = "warn"
+
+    # =====================================================
+    # Calm rule engine: require persistence before alert
+    # =====================================================
+    alerts: List[Dict[str, Any]] = []
+
+    def _persist_ok(cond_key: str, cond_true: bool) -> bool:
+        """Return True only if condition has been true for PERSIST_SEC."""
+        ck = (team, ff, cond_key)
+        tnow = time.time()
+        if cond_true:
+            if ck not in _cond_start:
+                _cond_start[ck] = tnow
+            return (tnow - _cond_start[ck]) >= PERSIST_SEC
+        else:
+            _cond_start.pop(ck, None)
+            return False
+
+    def add_alert(sev, cat, title, detail):
+        alerts.append({
+            "teamId": team,
+            "ffId": ff,
+            "name": FF_NAMES.get(ff, ff),
+            "severity": sev,          # ok/warn/danger
+            "category": cat,          # health/environment/location
+            "title": title,
+            "detail": detail,
+            "observedAt": nowz(),
+        })
+
+    # ---- Health alerts ----
+    if _persist_ok("pulse_crit", pulse_level == "Critical"):
+        add_alert("danger", "health", "Pulse Critical", pulse_hint)
+    elif _persist_ok("pulse_high", pulse_level == "High"):
+        add_alert("warn", "health", "Pulse High", pulse_hint)
+
+    # ---- Environment alerts ----
+    if _persist_ok("heat_danger", heat_level == "Danger"):
+        add_alert("danger", "environment", "Heat Danger", heat_hint)
+    elif _persist_ok("heat_hot", heat_level == "Hot"):
+        add_alert("warn", "environment", "Heat Rising", heat_hint)
+
+    if _persist_ok("smoke_extreme", smoke_level == "Extreme"):
+        add_alert("danger", "environment", "Smoke Extreme", smoke_hint)
+    elif _persist_ok("smoke_high", smoke_level == "High"):
+        add_alert("warn", "environment", "Smoke High", smoke_hint)
+
+    # ---- Location alerts ----
+    if isinstance(dist, (int, float)):
+        if _persist_ok("sep_danger", dist >= 140):
+            add_alert("danger", "location", "Separated", f"{int(dist)} m from leader")
+        elif _persist_ok("sep_warn", dist >= 95):
+            add_alert("warn", "location", "Drifting", f"{int(dist)} m from leader")
+
+    worst = "ok"
+    for a in alerts:
+        if _severity_rank(a["severity"]) > _severity_rank(worst):
+            worst = a["severity"]
+
+    # For UI convenience (frontend uses pulse/temp/gas names)
+    summary = {
+        "teamId": team,
+        "ffId": ff,
+        "name": FF_NAMES.get(ff, ff),
+
+        "severity": severity,        # ok/warn/danger (marker color)
+        "worst": worst,              # worst alert from rule engine
+        "observedAt": nowz(),
+        "lastSeenSec": last_seen_sec,
+
+        "lat": lat,
+        "lon": lon,
+        "accuracyM": acc,
+
+        "pulse": int(hr) if isinstance(hr, (int, float)) else None,
+        "temp": float(temp) if isinstance(temp, (int, float)) else None,
+        "gas": int(mq2) if isinstance(mq2, (int, float)) else None,
+
+        "pulseLevel": pulse_level,
+        "pulseHint": pulse_hint,
+        "heatLevel": heat_level,
+        "heatHint": heat_hint,
+        "smokeLevel": smoke_level,
+        "smokeHint": smoke_hint,
+        "distanceToLeaderM": dist,
+    }
+
+    alerts_packet = {
+        "teamId": team,
+        "ffId": ff,
+        "name": FF_NAMES.get(ff, ff),
+        "worst": worst,
+        "alerts": alerts,
+        "observedAt": nowz(),
+    }
+
+    return summary, alerts_packet
+
+def publish_ui(client: mqtt.Client, team: str, ff: str):
+    summary, alerts_packet = build_ui_summary(team, ff)
+    client.publish(f"{STATUS_TOPIC_PREFIX}/{team}/{ff}", json.dumps(summary), retain=True)
+
+    # Publish alerts only if signature changes, and cooldown allows
+    key = (team, ff)
+    sig = json.dumps([(a["severity"], a["category"], a["title"], a["detail"]) for a in alerts_packet["alerts"]])
+
+    ts = time.time()
+    last_ts = _last_alert_ts.get(key, 0.0)
+    can_publish = (ts - last_ts) >= ALERT_COOLDOWN_SEC
+
+    # Allow earlier publish if escalates to danger
+    prev_sig = _last_alert_sig.get(key)
+    prev_worst = "ok"
+    if prev_sig:
+        try:
+            prev = json.loads(prev_sig)
+            # reconstruct worst from signature
+            for sev, *_ in prev:
+                if _severity_rank(sev) > _severity_rank(prev_worst):
+                    prev_worst = sev
+        except Exception:
+            prev_worst = "ok"
+
+    if alerts_packet["worst"] == "danger" and (ts - last_ts) >= ESCALATION_BYPASS_SEC:
+        can_publish = True
+
+    if sig != prev_sig and can_publish:
+        client.publish(f"{ALERTS_TOPIC_PREFIX}/{team}/{ff}", json.dumps(alerts_packet), retain=True)
+        _last_alert_sig[key] = sig
+        _last_alert_ts[key] = ts
+
+# =========================================================
+# FAKE LOCATION SIM (smooth, human, no teleport)
+# =========================================================
+def meters_to_deg_lat(m): return m / 111_320.0
+def meters_to_deg_lon(m, lat): return m / (111_320.0 * math.cos(math.radians(lat)) + 1e-9)
+
+def clamp(v, lo, hi): return max(lo, min(hi, v))
+
+class FakeFF:
+    """
+    Smooth 2D motion around anchor using:
+    - gentle random "wander" acceleration (low frequency)
+    - soft radial constraint to keep within target band
+    - speed/acc limits to keep human-like motion
+    """
+    def __init__(self, ff_id: str, crisis: bool):
+        self.ff = ff_id
+        self.crisis = crisis
+        self.lat: Optional[float] = None
+        self.lon: Optional[float] = None
+        self.vx = 0.0  # m/s east
+        self.vy = 0.0  # m/s north
+        self._wander_phase = random.random() * 2 * math.pi
+        self._wander_rate = 0.12 + random.random() * 0.10  # rad/s
+        self._wander_gain = 0.10 if not crisis else 0.12
+
+    def attach(self, al, ao):
+        if self.crisis:
+            r = random.uniform(CRISIS_MIN_M, CRISIS_MIN_M + 15.0)
+        else:
+            r = random.uniform(BUBBLE_NEAR_MIN_M, BUBBLE_NEAR_MAX_M)
+
+        ang = random.random() * 2 * math.pi
+        self.lat = al + meters_to_deg_lat(r * math.sin(ang))
+        self.lon = ao + meters_to_deg_lon(r * math.cos(ang), al)
+        self.vx = self.vy = 0.0
+
+    def step(self, dt, al, ao):
+        assert self.lat is not None and self.lon is not None
+
+        # Convert to local meters relative to anchor
+        mx = (self.lon - ao) * (111_320.0 * math.cos(math.radians(al)))
+        my = (self.lat - al) * 111_320.0
+        dist = math.hypot(mx, my) + 1e-6
+
+        # Wander: slow changing direction
+        self._wander_phase += self._wander_rate * dt
+        wx = math.cos(self._wander_phase)
+        wy = math.sin(self._wander_phase)
+
+        ax = self._wander_gain * wx
+        ay = self._wander_gain * wy
+
+        # Soft radial control:
+        # - Non-crisis: keep in a band around anchor (12..35m)
+        # - Crisis: drift outward toward ~125m, but cap ~165m
+        if not self.crisis:
+            # choose a gentle target that changes slowly
+            target = (BUBBLE_NEAR_MIN_M + BUBBLE_NEAR_MAX_M) * 0.5
+            # pull in if too far, push out if too close (very soft)
+            err = dist - target
+            radial_gain = 0.010
+            ax += -(mx / dist) * radial_gain * err
+            ay += -(my / dist) * radial_gain * err
+
+            # hard-ish boundaries
+            if dist > (BUBBLE_NEAR_MAX_M + 10):
+                ax += -(mx / dist) * 0.08
+                ay += -(my / dist) * 0.08
+            if dist < (BUBBLE_NEAR_MIN_M - 3):
+                ax += (mx / dist) * 0.06
+                ay += (my / dist) * 0.06
+
+        else:
+            # crisis wants to drift out of bubble smoothly
+            # push outward until around CRISIS_TARGET_M, but not past CRISIS_MAX_M
+            outward = (mx / dist)
+            outward_y = (my / dist)
+
+            if dist < CRISIS_TARGET_M:
+                ax += outward * 0.06
+                ay += outward_y * 0.06
+            elif dist > CRISIS_MAX_M:
+                ax += -outward * 0.12
+                ay += -outward_y * 0.12
+            else:
+                # small orbit + mild outward bias
+                ax += outward * 0.015
+                ay += outward_y * 0.015
+
+            # also keep some tangential motion so it looks "searching"
+            ax += -outward_y * 0.03
+            ay += outward * 0.03
+
+        # Acceleration limit
+        a = math.hypot(ax, ay)
+        if a > MAX_ACCEL_MPS2:
+            s = MAX_ACCEL_MPS2 / a
+            ax *= s
+            ay *= s
+
+        # Integrate velocity
+        self.vx += ax * dt
+        self.vy += ay * dt
+
+        # Speed limit
+        v = math.hypot(self.vx, self.vy)
+        if v > MAX_SPEED_MPS:
+            s = MAX_SPEED_MPS / v
+            self.vx *= s
+            self.vy *= s
+
+        # Integrate position (meters -> degrees)
+        self.lat += meters_to_deg_lat(self.vy * dt)
+        self.lon += meters_to_deg_lon(self.vx * dt, self.lat)
+
+        # Tiny jitter to avoid perfect paths (still non-teleport)
+        j = 0.05 if self.crisis else 0.03
+        self.lat += meters_to_deg_lat((random.random() - 0.5) * j)
+        self.lon += meters_to_deg_lon((random.random() - 0.5) * j, self.lat)
+
+        return {
+            "teamId": TEAM_ID,
+            "ffId": self.ff,
+            "lat": self.lat,
+            "lon": self.lon,
+            "accuracyM": FAKE_LOC_ACCURACY_M,
+            "observedAt": nowz(),
+            "source": "fake",
+        }
+
+fake_units = {
+    "FF_B": FakeFF("FF_B", False),
+    "FF_C": FakeFF("FF_C", True),
+    "FF_D": FakeFF("FF_D", False),
+}
+
+def fake_loop(client):
+    logging.info("Fake sim: waiting for real FF_A location ...")
+    while (TEAM_ID, REAL_FF_ID) not in last_loc:
+        time.sleep(0.5)
+
+    al = last_loc[(TEAM_ID, REAL_FF_ID)].get("lat", FALLBACK_LAT)
+    ao = last_loc[(TEAM_ID, REAL_FF_ID)].get("lon", FALLBACK_LON)
+    logging.info("Fake sim: anchor acquired (%.6f, %.6f)", al, ao)
+
+    for sim in fake_units.values():
+        sim.attach(al, ao)
+
+    period = 1.0 / FAKE_LOC_HZ
+    last_t = time.time()
+
+    while True:
+        t = time.time()
+        dt = max(0.10, min(1.0, t - last_t))
+        last_t = t
+
+        a = last_loc.get((TEAM_ID, REAL_FF_ID))
+        if a and isinstance(a.get("lat"), (int, float)) and isinstance(a.get("lon"), (int, float)):
+            al, ao = a["lat"], a["lon"]
+
+        for ff, sim in fake_units.items():
+            p = sim.step(dt, al, ao)
+            client.publish(f"ngsi/Location/{TEAM_ID}/{ff}", json.dumps(p), retain=True)
+            last_loc[(TEAM_ID, ff)] = {"lat": p["lat"], "lon": p["lon"], "accuracyM": p["accuracyM"]}
+            last_seen[(TEAM_ID, ff)] = time.time()
+            publish_ui(client, TEAM_ID, ff)
+
+        time.sleep(period)
+
+# =========================================================
+# MQTT
+# =========================================================
+def on_connect(client, userdata, flags, rc):
+    if rc == 0:
+        logging.info("✅ Connected to MQTT broker")
+        for tpc, q in MQTT_TOPICS:
+            client.subscribe(tpc, q)
+    else:
+        logging.error("❌ MQTT connect failed rc=%s", rc)
+
+def on_message(client, userdata, msg):
+    if msg.topic.startswith("raw/ECG/"):
+        return
+
+    try:
+        payload = json.loads(msg.payload.decode())
+    except Exception:
+        return
+
+    eid, etype, team, ff = topic_to_entity(msg.topic)
+    if not eid:
+        return
+
+    # Orion
+    filtered = filter_orion_payload(payload)
+    if filtered:
+        send_to_orion(build_ngsi_entity(eid, etype, filtered))
+
+    # State + UI
+    if etype == "Location" and team and ff:
+        # OwnTracks sometimes uses "acc"
+        if "accuracyM" not in payload and "acc" in payload:
+            payload["accuracyM"] = payload.get("acc")
+
+        if isinstance(payload.get("lat"), (int, float)) and isinstance(payload.get("lon"), (int, float)):
+            last_loc[(team, ff)] = {
+                "lat": float(payload.get("lat")),
+                "lon": float(payload.get("lon")),
+                "accuracyM": payload.get("accuracyM"),
+            }
+            last_seen[(team, ff)] = time.time()
+            publish_ui(client, team, ff)
+
+    elif etype == "Environment" and team and ff:
+        last_env[(team, ff)] = payload
+        last_seen[(team, ff)] = time.time()
+        publish_ui(client, team, ff)
+
+    elif etype == "Biomedical" and team and ff:
+        last_bio[(team, ff)] = payload
+        last_seen[(team, ff)] = time.time()
+        publish_ui(client, team, ff)
+
+# =========================================================
+# MAIN
+# =========================================================
+def main():
+    client = mqtt.Client()
+    client.on_connect = on_connect
+    client.on_message = on_message
+    client.connect(MQTT_BROKER_HOST, MQTT_BROKER_PORT, keepalive=60)
+
+    threading.Thread(target=fake_loop, args=(client,), daemon=True).start()
+    client.loop_forever()
+
+if __name__ == "__main__":
+    main()

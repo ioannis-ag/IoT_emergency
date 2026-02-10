@@ -1,3 +1,7 @@
+// =========================================================
+// EDGE DASHBOARD (FULL) — WITH TRAILS (LAST 10 LOCATIONS)
+// =========================================================
+
 const CONFIG = {
   MQTT_HOST: window.location.hostname || "localhost",
   MQTT_PORT: 9001,
@@ -7,8 +11,43 @@ const CONFIG = {
 
 const FF_ORDER = ["FF_A", "FF_B", "FF_C", "FF_D"];
 
+// ===== TRAILS CONFIG =====
+const TRAIL_POINTS = 10;         // last N points kept
+const TRAIL_MIN_METERS = 3;      // ignore small GPS jitter
+const TRAIL_OPTS = { weight: 4, opacity: 0.75 }; // Leaflet polyline options
+const trails = {};               // ffId -> { points: [[lat,lng],...], line: L.Polyline }
+
+// ===== Render throttle (prevents 1000 fps re-render) =====
+let renderTimer = null;
+function scheduleRender(){
+  if (renderTimer) return;
+  renderTimer = setTimeout(() => {
+    renderTimer = null;
+    renderAllCards();
+  }, 200); // max 5 renders/sec
+}
+
+/**
+ * ===== CAMERA FEEDS PER FIREFIGHTER =====
+ * Use MJPEG if possible: type: "mjpeg" (renders in <img>)
+ * If you have an embeddable page: type: "iframe" (renders in <iframe>)
+ */
+const CAMERA_URLS = {
+  FF_A: { type: "iframe", url: "http://192.168.2.13:8889/cam" },
+  FF_B: { type: "mjpeg",  url: "http://192.168.2.50:8080/stream_ff_b.mjpg" },
+  FF_C: { type: "mjpeg",  url: "http://192.168.2.50:8080/stream_ff_c.mjpg" },
+  FF_D: { type: "mjpeg",  url: "http://192.168.2.50:8080/stream_ff_d.mjpg" },
+};
+
+// Optional: click to open full stream:
+function openCamera(ffId){
+  const cam = CAMERA_URLS[ffId];
+  if (!cam?.url) return;
+  window.open(cam.url, "_blank", "noopener");
+}
+
 const state = {
-  members: {},        // ffId -> summary
+  members: {},        // ffId -> status summary
   alertsByFf: {},     // ffId -> last alerts packet
   centeredOnce: false
 };
@@ -20,6 +59,9 @@ function isNum(x){ return typeof x === "number" && Number.isFinite(x); }
 function fmt(x, d=0){ return isNum(x) ? x.toFixed(d) : "—"; }
 function sevRank(s){ return ({ok:0, warn:1, danger:2}[s] ?? 0); }
 
+// =========================================================
+// CLOCK
+// =========================================================
 function tickClock(){
   const el = document.getElementById("clock");
   if (!el) return;
@@ -31,7 +73,47 @@ function tickClock(){
 setInterval(tickClock, 1000);
 tickClock();
 
-/* MARKERS */
+// =========================================================
+// TRAILS (POLYLINES PER FIREFIGHTER)
+// =========================================================
+function distanceMeters(a, b){
+  // Haversine
+  const R = 6371000;
+  const toRad = x => x * Math.PI / 180;
+  const dLat = toRad(b[0] - a[0]);
+  const dLon = toRad(b[1] - a[1]);
+  const lat1 = toRad(a[0]);
+  const lat2 = toRad(b[0]);
+  const s = Math.sin(dLat/2)**2 + Math.cos(lat1)*Math.cos(lat2)*Math.sin(dLon/2)**2;
+  return 2 * R * Math.asin(Math.min(1, Math.sqrt(s)));
+}
+
+function ensureTrail(ffId){
+  if (!trails[ffId]){
+    trails[ffId] = {
+      points: [],
+      line: L.polyline([], TRAIL_OPTS).addTo(map)
+    };
+  }
+  return trails[ffId];
+}
+
+function pushTrailPoint(ffId, lat, lon){
+  const t = ensureTrail(ffId);
+  const p = [lat, lon];
+
+  const last = t.points[t.points.length - 1];
+  if (last && distanceMeters(last, p) < TRAIL_MIN_METERS) return;
+
+  t.points.push(p);
+  if (t.points.length > TRAIL_POINTS) t.points.shift();
+
+  t.line.setLatLngs(t.points);
+}
+
+// =========================================================
+// MARKERS
+// =========================================================
 function markerIcon(sev="ok"){
   const cls = sev === "danger" ? "ff-danger" : (sev === "warn" ? "ff-warn" : "ff-ok");
   return L.divIcon({
@@ -63,6 +145,9 @@ function upsertMarker(m){
   if (!isNum(m.lat) || !isNum(m.lon)) return;
   const id = m.ffId;
 
+  // NEW: update trail whenever we have a valid position
+  pushTrailPoint(id, m.lat, m.lon);
+
   if (!markers[id]){
     const mk = L.marker([m.lat, m.lon], { icon: markerIcon(m.severity) }).addTo(map);
     mk.bindPopup(popupHtml(m));
@@ -76,7 +161,9 @@ function upsertMarker(m){
   }
 }
 
-/* AUTO-CENTER ON LEADER */
+// =========================================================
+// AUTO-CENTER ON LEADER
+// =========================================================
 function maybeCenterOnLeader(){
   const a = state.members["FF_A"];
   if (!a || !isNum(a.lat) || !isNum(a.lon)) return;
@@ -87,11 +174,37 @@ function maybeCenterOnLeader(){
   }
 }
 
-/* UNIT CARDS */
+// =========================================================
+// UNIT CARDS
+// =========================================================
 function kpiClass(level){
   if (level === "Critical" || level === "Danger" || level === "Extreme") return "danger";
   if (level === "High" || level === "Hot") return "warn";
   return "";
+}
+
+function cameraHtml(ffId){
+  const cam = CAMERA_URLS[ffId];
+  if (!cam?.url){
+    return `<div class="cam cam-empty">No camera</div>`;
+  }
+
+  if (cam.type === "iframe"){
+    return `
+      <div class="cam" data-ff="${ffId}" title="Click to open">
+        <iframe class="cam-iframe" src="${cam.url}" loading="lazy" referrerpolicy="no-referrer"></iframe>
+        <div class="cam-overlay">LIVE</div>
+      </div>
+    `;
+  }
+
+  // mjpeg
+  return `
+    <div class="cam" data-ff="${ffId}" title="Click to open">
+      <img class="cam-img" src="${cam.url}" alt="Camera ${ffId}" />
+      <div class="cam-overlay">LIVE</div>
+    </div>
+  `;
 }
 
 function renderUnitCard(ffId){
@@ -107,64 +220,82 @@ function renderUnitCard(ffId){
         <span class="pill stale">WAITING</span>
       </div>
       <div class="unit-meta">No data yet</div>
+      ${cameraHtml(ffId)}
       <div class="kpis">
         <div class="kpi"><div class="v">—</div><div class="l">Pulse</div></div>
         <div class="kpi"><div class="v">—</div><div class="l">Temp</div></div>
         <div class="kpi"><div class="v">—</div><div class="l">Smoke</div></div>
       </div>
     `;
-    return;
+  } else {
+    const stale = (m.lastSeenSec ?? 9999) > 12;
+    const pill = stale
+      ? `<span class="pill stale">STALE</span>`
+      : `<span class="pill ${m.severity}">${(m.severity||"ok").toUpperCase()}</span>`;
+
+    const dist = isNum(m.distanceToLeaderM) ? `${Math.round(m.distanceToLeaderM)}m` : "—";
+    const last = (m.lastSeenSec ?? null) === null ? "—" : `${m.lastSeenSec}s`;
+
+    el.innerHTML = `
+      <div class="unit-top">
+        <div class="unit-name">${m.name}</div>
+        ${pill}
+      </div>
+      <div class="unit-meta">
+        <span>${m.ffId}</span>
+        <span>⏱ ${last}</span>
+        <span>📍 ${dist}</span>
+      </div>
+
+      ${cameraHtml(ffId)}
+
+      <div class="kpis">
+        <div class="kpi ${kpiClass(m.pulseLevel)}">
+          <div class="v">${fmt(m.pulse,0)}</div>
+          <div class="l">Pulse</div>
+        </div>
+        <div class="kpi ${kpiClass(m.heatLevel)}">
+          <div class="v">${fmt(m.temp,1)}°C</div>
+          <div class="l">Temp</div>
+        </div>
+        <div class="kpi ${kpiClass(m.smokeLevel)}">
+          <div class="v">${fmt(m.gas,0)}</div>
+          <div class="l">Smoke</div>
+        </div>
+      </div>
+    `;
   }
 
-  const stale = (m.lastSeenSec ?? 9999) > 12;
-  const pill = stale
-    ? `<span class="pill stale">STALE</span>`
-    : `<span class="pill ${m.severity}">${(m.severity||"ok").toUpperCase()}</span>`;
+  // Click card -> zoom map to unit + open popup
+  el.onclick = (ev) => {
+    // If user clicked on camera, let camera handler run and don't zoom.
+    const camEl = ev.target?.closest?.(".cam");
+    if (camEl) return;
 
-  const dist = isNum(m.distanceToLeaderM) ? `${Math.round(m.distanceToLeaderM)}m` : "—";
-  const last = (m.lastSeenSec ?? null) === null ? "—" : `${m.lastSeenSec}s`;
-
-  el.innerHTML = `
-    <div class="unit-top">
-      <div class="unit-name">${m.name}</div>
-      ${pill}
-    </div>
-    <div class="unit-meta">
-      <span>${m.ffId}</span>
-      <span>⏱ ${last}</span>
-      <span>📍 ${dist}</span>
-    </div>
-
-    <div class="kpis">
-      <div class="kpi ${kpiClass(m.pulseLevel)}">
-        <div class="v">${fmt(m.pulse,0)}</div>
-        <div class="l">Pulse</div>
-      </div>
-      <div class="kpi ${kpiClass(m.heatLevel)}">
-        <div class="v">${fmt(m.temp,1)}°C</div>
-        <div class="l">Temp</div>
-      </div>
-      <div class="kpi ${kpiClass(m.smokeLevel)}">
-        <div class="v">${fmt(m.gas,0)}</div>
-        <div class="l">Smoke</div>
-      </div>
-    </div>
-  `;
-
-  // click card -> zoom map to unit + open popup
-  el.onclick = () => {
-    if (isNum(m.lat) && isNum(m.lon)){
-      map.setView([m.lat, m.lon], 19);
-      markers[m.ffId]?.openPopup();
+    const m2 = state.members[ffId];
+    if (m2 && isNum(m2.lat) && isNum(m2.lon)){
+      map.setView([m2.lat, m2.lon], 19);
+      markers[ffId]?.openPopup();
     }
   };
+
+  // Click camera -> open full stream
+  const cam = el.querySelector(".cam");
+  if (cam){
+    cam.addEventListener("click", (e) => {
+      e.stopPropagation();
+      openCamera(ffId);
+    });
+  }
 }
 
 function renderAllCards(){
   FF_ORDER.forEach(renderUnitCard);
 }
 
-/* ALERTS (BOTTOM PANEL ONLY — NO TOP-RIGHT TOASTS) */
+// =========================================================
+// ALERTS (BOTTOM PANEL ONLY)
+// =========================================================
 function worstOverall(){
   let w = "ok";
   for (const p of Object.values(state.alertsByFf)){
@@ -185,12 +316,10 @@ function updateMissionBadge(){
     badge.classList.add(worst);
     badge.textContent = worst === "danger" ? "Danger" : worst === "warn" ? "Warning" : "Nominal";
   }
-
   if (panel){
     panel.classList.remove("ok","warn","danger");
     panel.classList.add(worst);
   }
-
   if (sub){
     sub.textContent =
       worst === "danger" ? "Immediate attention required" :
@@ -215,7 +344,6 @@ function renderAlerts(){
     return;
   }
 
-  // Show up to 2 units with alerts, up to 4 alerts each
   packets.slice(0,2).forEach(p => {
     const block = document.createElement("div");
     block.className = "alert-block";
@@ -241,7 +369,9 @@ function renderAlerts(){
   updateMissionBadge();
 }
 
-/* MQTT */
+// =========================================================
+// MQTT
+// =========================================================
 function connectMQTT(){
   const client = mqtt.connect(`ws://${CONFIG.MQTT_HOST}:${CONFIG.MQTT_PORT}/mqtt`);
 
@@ -263,9 +393,9 @@ function connectMQTT(){
       if (!msg.ffId) return;
 
       state.members[msg.ffId] = msg;
-      upsertMarker(msg);
+      upsertMarker(msg);          // <-- trail updates inside here now
 
-      renderAllCards();
+      scheduleRender();
       maybeCenterOnLeader();
     }
 
@@ -274,12 +404,13 @@ function connectMQTT(){
 
       state.alertsByFf[msg.ffId] = msg;
       renderAlerts();
-      // intentionally NO toast popups here
     }
   });
 }
 
-/* INIT */
+// =========================================================
+// INIT
+// =========================================================
 function initMap(){
   map = L.map("mainMap").setView([38.2466, 21.7346], 19);
   L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {

@@ -117,7 +117,7 @@ body {
 .actions { display: flex; gap: 10px; }
 .map { flex: 1; min-height: 0; }
 
-/* ===== NEW: Incident readout line ===== */
+/* ===== Incident readout line ===== */
 .incident-line{
   margin-top: 8px;
   display: flex;
@@ -142,7 +142,6 @@ body {
   color: var(--muted);
   font-weight: 900;
 }
-/* ===== END NEW ===== */
 
 /* Units column */
 .units {
@@ -227,10 +226,7 @@ body {
   transition: .15s;
 }
 .btn:hover { filter: brightness(.98); transform: translateY(-1px); }
-.btn.ghost {
-  background: #fff;
-  color: var(--blue);
-}
+.btn.ghost { background: #fff; color: var(--blue); }
 
 /* Pills / badges */
 .badge {
@@ -261,10 +257,7 @@ body {
 }
 
 /* Alerts bottom full-width */
-.alerts-panel {
-  grid-column: 1 / span 2;
-  grid-row: 2;
-}
+.alerts-panel { grid-column: 1 / span 2; grid-row: 2; }
 
 .alerts-head {
   display: flex;
@@ -303,20 +296,6 @@ body {
   font-size: 13px;
 }
 
-.alerts-panel.warn .alerts-head {
-  background: linear-gradient(180deg, rgba(245, 158, 11, .16), #fff);
-}
-.alerts-panel.danger .alerts-head {
-  background: linear-gradient(180deg, rgba(239, 68, 68, .18), #fff);
-  animation: alertPulse 1.3s infinite;
-}
-
-@keyframes alertPulse {
-  0% { box-shadow: 0 0 0 0 rgba(239, 68, 68, .22); }
-  70% { box-shadow: 0 0 0 16px rgba(239, 68, 68, 0); }
-  100% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0); }
-}
-
 .alert-block {
   border: 1px solid var(--border);
   border-radius: 16px;
@@ -346,27 +325,86 @@ body {
 .alert-item .t { font-weight: 1100; font-size: 13px; }
 .alert-item .d { font-size: 13px; color: var(--muted); margin-top: 2px; }
 
-/* Markers */
-.ff-marker-wrap {
-  width: 18px; height: 18px;
-  border-radius: 999px;
-  border: 2px solid #fff;
-  box-shadow: 0 10px 18px rgba(15, 23, 42, .18);
-}
-.ff-ok { background: var(--ok); }
-.ff-warn { background: var(--warn); }
-.ff-danger { background: var(--danger); animation: pulse 1.2s infinite; }
-@keyframes pulse {
-  0% { box-shadow: 0 0 0 0 rgba(239, 68, 68, .28), 0 10px 18px rgba(15, 23, 42, .18); }
-  70% { box-shadow: 0 0 0 14px rgba(239, 68, 68, 0), 0 10px 18px rgba(15, 23, 42, .18); }
-  100% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0), 0 10px 18px rgba(15, 23, 42, .18); }
-}
-
 /* Leaflet popup */
 .leaflet-popup-content-wrapper {
   border-radius: 16px !important;
   border: 1px solid var(--border);
   box-shadow: var(--shadow);
+}
+
+/* Camera preview inside unit cards */
+.cam{
+  margin-top: 10px;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  overflow: hidden;
+  height: 200px;
+  min-height: 200px;
+  flex: 0 0 200px;   /* prevents shrinking */
+  background: #0b1220;
+  position: relative;
+  cursor: pointer;
+}
+
+/* IMG/MJPEG + normal iframe */
+.cam-img, .cam-iframe{
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  border: 0;
+  display: block;
+}
+
+/* ===== YouTube player fill (no crop zoom) =====
+   This will fill the box as much as YT allows;
+   if aspect ratio differs, you'll get minimal bars (normal).
+*/
+.cam-yt, .cam-yt > div, .cam-yt iframe{
+  width: 100% !important;
+  height: 100% !important;
+  border: 0 !important;
+  display: block !important;
+}
+
+/* Overlay */
+.cam-overlay{
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  background: rgba(239,68,68,.92);
+  color: #fff;
+  font-weight: 1100;
+  font-size: 11px;
+  padding: 4px 8px;
+  border-radius: 999px;
+}
+
+/* Tap overlay if autoplay blocked */
+.cam-tap{
+  position:absolute;
+  inset:0;
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  background: rgba(0,0,0,.35);
+  z-index: 5;
+}
+.cam-tap-btn{
+  border: 0;
+  border-radius: 999px;
+  padding: 10px 14px;
+  font-weight: 1100;
+  cursor: pointer;
+}
+
+/* Hide LIVE pill on YT cards */
+.cam-yt .cam-overlay{ display: none !important; }
+
+.cam-empty{
+  display: grid;
+  place-items: center;
+  color: rgba(255,255,255,.8);
+  font-weight: 1000;
 }
 
 /* Toast */
@@ -387,80 +425,3 @@ body {
 .toast.danger { border-color: rgba(239, 68, 68, .24); }
 .toast .tt { font-weight: 1100; margin-bottom: 4px; }
 .toast .tb { color: var(--muted); font-size: 13px; }
-
-/* Camera preview inside unit cards */
-.cam{
-  margin-top: 10px;
-  border: 1px solid var(--border);
-  border-radius: 14px;
-  overflow: hidden;
-  height: 110px;
-  background: #0b1220;
-  position: relative;
-  cursor: pointer;
-}
-
-.cam-img, .cam-iframe{
-  width: 100%;
-  height: 100%;
-  object-fit: cover;
-  border: 0;
-  display: block;
-}
-
-.cam-overlay{
-  position: absolute;
-  top: 8px;
-  left: 8px;
-  background: rgba(239,68,68,.92);
-  color: #fff;
-  font-weight: 1100;
-  font-size: 11px;
-  padding: 4px 8px;
-  border-radius: 999px;
-}
-
-.cam-empty{
-  display: grid;
-  place-items: center;
-  color: rgba(255,255,255,.8);
-  font-weight: 1000;
-}
-.cam-img, .cam-iframe{
-  width: 100%;
-  height: 100%;
-  object-fit: cover;
-  border: 0;
-  display: block;
-}
-
-/* Ensure YT player fills the camera box */
-.cam-yt, .cam-yt > div, .cam-yt iframe{
-  width: 100% !important;
-  height: 100% !important;
-  border: 0 !important;
-  display: block;
-}
-
-.cam-tap{
-  position:absolute;
-  inset:0;
-  display:flex;
-  align-items:center;
-  justify-content:center;
-  background: rgba(0,0,0,.35);
-  z-index: 5;
-}
-
-.cam-tap-btn{
-  border: 0;
-  border-radius: 999px;
-  padding: 10px 14px;
-  font-weight: 1100;
-  cursor: pointer;
-}
-
-/* Hide the red LIVE pill on YouTube camera cards */
-.cam-yt .cam-overlay{
-  display: none !important;
-}

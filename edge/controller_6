@@ -59,10 +59,10 @@ ALERT_COOLDOWN_SEC = 35.0
 ESCALATION_BYPASS_SEC = 8.0  # if escalates to danger, allow sooner publish
 
 FF_NAMES = {
-    "FF_A": "Alex",
-    "FF_B": "Bob",
-    "FF_C": "Chris",
-    "FF_D": "Daniel",
+    "FF_A": "Alex (Leader)",
+    "FF_B": "Maria",
+    "FF_C": "Nikos (Crisis)",
+    "FF_D": "Eleni",
 }
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")

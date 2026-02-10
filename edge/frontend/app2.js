@@ -1,6 +1,6 @@
 // =========================================================
-// EDGE DASHBOARD — WITH TRAILS + SHOW EVERYONE + INCIDENT RADIUS
-// + YOUTUBE SEGMENT PLAYBACK FOR B/C/D (40s loops)
+// EDGE DASHBOARD — STABLE CAMERAS (NO RE-RENDER BREAKAGE)
+// + TRAILS + SHOW EVERYONE + INCIDENT RADIUS + YT SEGMENTS
 // =========================================================
 
 const CONFIG = {
@@ -8,7 +8,7 @@ const CONFIG = {
   MQTT_PORT: 9001,
   TEAM_TOPIC: "edge/status/Team_A/#",
   ALERT_TOPIC: "edge/alerts/Team_A/#",
-  INCIDENT_TOPIC: "edge/incident/Team_A"
+  INCIDENT_TOPIC: "edge/incident/Team_A",
 };
 
 const FF_ORDER = ["FF_A", "FF_B", "FF_C", "FF_D"];
@@ -29,41 +29,41 @@ function scheduleRender(){
   }, 200);
 }
 
-/**
- * ===== CAMERA FEEDS PER FIREFIGHTER =====
- * For YouTube segment loops use: type: "youtube"
- */
+// =========================================================
+// CAMERA CONFIG
+// - FF_A uses iframe (your mtX / mtxmedia endpoint)
+// - FF_B/C/D use YouTube segments with loop windows
+// =========================================================
+const YT_VIDEO_ID = "mphHFk5IXsQ";
 const CAMERA_URLS = {
   FF_A: { type: "iframe", url: "http://192.168.2.13:8889/cam" },
 
-  // YouTube segments (video mphHFk5IXsQ):
-  // B: 00:10 -> 00:50
-  // C: 01:10 -> 01:50
-  // D: 02:10 -> 02:50
-  FF_B: { type: "youtube", videoId: "mphHFk5IXsQ", start: 10,  duration: 40 },
-  FF_C: { type: "youtube", videoId: "mphHFk5IXsQ", start: 70,  duration: 40 },
-  FF_D: { type: "youtube", videoId: "mphHFk5IXsQ", start: 130, duration: 40 },
+  // YouTube segments:
+  FF_B: { type: "youtube", videoId: YT_VIDEO_ID, start: 10,  dur: 40 },
+  FF_C: { type: "youtube", videoId: YT_VIDEO_ID, start: 70,  dur: 40 },  // 1:10
+  FF_D: { type: "youtube", videoId: YT_VIDEO_ID, start: 130, dur: 40 },  // 2:10
 };
 
+// Optional: click to open full feed in new tab
 function openCamera(ffId){
   const cam = CAMERA_URLS[ffId];
   if (!cam) return;
-
   if (cam.type === "youtube"){
-    const t = cam.start ?? 0;
-    window.open(`https://www.youtube.com/watch?v=${cam.videoId}&t=${t}s`, "_blank", "noopener");
-    return;
+    const url = `https://www.youtube.com/watch?v=${cam.videoId}&t=${cam.start || 0}s`;
+    window.open(url, "_blank", "noopener");
+  } else if (cam.url){
+    window.open(cam.url, "_blank", "noopener");
   }
-
-  if (!cam.url) return;
-  window.open(cam.url, "_blank", "noopener");
 }
 
+// =========================================================
+// STATE
+// =========================================================
 const state = {
-  members: {},
-  alertsByFf: {},
+  members: {},        // ffId -> summary
+  alertsByFf: {},     // ffId -> alerts packet
   centeredOnce: false,
-  incident: null, // {lat,lon,radiusM,...}
+  incident: null,     // {lat,lon,radiusM,...}
 };
 
 let map;
@@ -74,7 +74,7 @@ let incidentCircle = null;
 let incidentHotRing = null;
 
 // =========================================================
-// Helpers
+// HELPERS
 // =========================================================
 function isNum(x){ return typeof x === "number" && Number.isFinite(x); }
 function fmt(x, d=0){ return isNum(x) ? x.toFixed(d) : "—"; }
@@ -121,18 +121,16 @@ function ensureTrail(ffId){
 function pushTrailPoint(ffId, lat, lon){
   const t = ensureTrail(ffId);
   const p = [lat, lon];
-
   const last = t.points[t.points.length - 1];
   if (last && distanceMeters(last, p) < TRAIL_MIN_METERS) return;
 
   t.points.push(p);
   if (t.points.length > TRAIL_POINTS) t.points.shift();
-
   t.line.setLatLngs(t.points);
 }
 
 // =========================================================
-// INCIDENT DRAWING
+// INCIDENT UI
 // =========================================================
 function updateIncidentUI(pkt){
   state.incident = pkt;
@@ -140,11 +138,10 @@ function updateIncidentUI(pkt){
   const txt = document.getElementById("incidentText");
   if (txt){
     const lead = isNum(pkt.leadM) ? ` • lead ${Math.round(pkt.leadM)}m` : "";
-    txt.textContent = `🔥 r=${Math.round(pkt.radiusM)}m${lead}`;
+    txt.textContent = `r=${Math.round(pkt.radiusM)}m${lead}`;
   }
 
   if (!map) return;
-
   const center = [pkt.lat, pkt.lon];
 
   if (!incidentCircle){
@@ -239,7 +236,7 @@ function maybeCenterOnLeader(){
 }
 
 // =========================================================
-// SHOW EVERYONE (fit bounds) — includes incident if available
+// SHOW EVERYONE (fit bounds)
 // =========================================================
 function fitToEveryone(){
   const pts = [];
@@ -265,164 +262,7 @@ function fitToEveryone(){
 }
 
 // =========================================================
-// YOUTUBE SEGMENT PLAYER (B/C/D)
-// =========================================================
-const ytPlayers = {};        // ffId -> YT.Player
-const ytSegments = {};       // ffId -> {start,end,videoId}
-let ytApiReady = false;
-let ytTick = null;
-
-// Called by YouTube API automatically (global)
-window.onYouTubeIframeAPIReady = () => {
-  ytApiReady = true;
-  tryInitAllYouTubePlayers();
-};
-
-function segmentFor(ffId){
-  const cam = CAMERA_URLS[ffId];
-  if (!cam || cam.type !== "youtube") return null;
-  const start = cam.start ?? 0;
-  const end = start + (cam.duration ?? 40);
-  return { start, end, videoId: cam.videoId };
-}
-
-function showTapOverlay(ffId){
-  const el = document.getElementById(`tap-${ffId}`);
-  if (el) el.style.display = "flex";
-}
-function hideTapOverlay(ffId){
-  const el = document.getElementById(`tap-${ffId}`);
-  if (el) el.style.display = "none";
-}
-
-function userPlay(ffId){
-  const p = ytPlayers[ffId];
-  const s = ytSegments[ffId];
-  if (!p || !s) return;
-
-  try { p.mute(); } catch {}
-  try { p.seekTo(s.start, true); } catch {}
-  try { p.playVideo(); } catch {}
-
-  hideTapOverlay(ffId);
-}
-
-function tryInitAllYouTubePlayers(){
-  if (!ytApiReady) return;
-
-  for (const ffId of FF_ORDER){
-    const cam = CAMERA_URLS[ffId];
-    if (cam?.type !== "youtube") continue;
-
-    const host = document.getElementById(`yt-${ffId}`);
-    if (!host) continue;
-
-    // If DOM got re-rendered, the old player is attached to a removed element.
-    // Safest: destroy and recreate when the host is new.
-    if (ytPlayers[ffId]){
-      // If the old player's iframe is not inside the current host, rebuild.
-      try {
-        const iframe = ytPlayers[ffId].getIframe?.();
-        if (iframe && !host.contains(iframe)){
-          ytPlayers[ffId].destroy?.();
-          delete ytPlayers[ffId];
-        }
-      } catch {
-        // ignore
-      }
-    }
-
-    if (ytPlayers[ffId]) continue;
-
-    const seg = segmentFor(ffId);
-    if (!seg) continue;
-
-    ytSegments[ffId] = seg;
-
-    ytPlayers[ffId] = new YT.Player(`yt-${ffId}`, {
-      videoId: seg.videoId,
-      playerVars: {
-        autoplay: 1,
-        controls: 0,
-        mute: 1,
-        rel: 0,
-        playsinline: 1,
-        modestbranding: 1,
-        fs: 0,
-        iv_load_policy: 3,
-        start: seg.start,
-        loop: 1,
-        playlist: seg.videoId,
-      },
-      events: {
-        onReady: (e) => {
-          const player = e.target;
-
-          try { player.mute(); } catch {}
-          try { player.seekTo(seg.start, true); } catch {}
-
-          // Many browsers need a short delay after ready
-          setTimeout(() => {
-            try { player.playVideo(); } catch {}
-          }, 300);
-
-          ensureYtTicker();
-          hideTapOverlay(ffId);
-        },
-        onStateChange: (e) => {
-          const player = e.target;
-          const s = ytSegments[ffId];
-          if (!s) return;
-
-          if (e.data === YT.PlayerState.ENDED){
-            try { player.seekTo(s.start, true); player.playVideo(); } catch {}
-            return;
-          }
-
-          // Autoplay blocked often results in PAUSED state
-          if (e.data === YT.PlayerState.PAUSED){
-            showTapOverlay(ffId);
-          }
-
-          if (e.data === YT.PlayerState.PLAYING){
-            hideTapOverlay(ffId);
-          }
-        }
-      }
-    });
-  }
-}
-
-function ensureYtTicker(){
-  if (ytTick) return;
-  ytTick = setInterval(() => {
-    for (const [ffId, player] of Object.entries(ytPlayers)){
-      const seg = ytSegments[ffId];
-      if (!seg) continue;
-
-      try {
-        const t = player.getCurrentTime?.();
-        const st = player.getPlayerState?.();
-
-        // If not playing, we don't force-play too aggressively (browser policies),
-        // but we do keep it in bounds when it *is* playing.
-        if (typeof t === "number"){
-          if (t < seg.start - 0.3 || t >= seg.end - 0.2){
-            player.seekTo?.(seg.start, true);
-            if (st === YT.PlayerState.PLAYING || st === YT.PlayerState.BUFFERING){
-              player.playVideo?.();
-            }
-          }
-        }
-      } catch {
-        // ignore
-      }
-    }
-  }, 500);
-}
-
-// =========================================================
-// UNIT CARDS
+// KPI CLASS
 // =========================================================
 function kpiClass(level){
   if (level === "Critical" || level === "Danger" || level === "Extreme") return "danger";
@@ -430,141 +270,165 @@ function kpiClass(level){
   return "";
 }
 
+// =========================================================
+// CAMERA HTML (STATIC — inserted ONCE)
+// IMPORTANT: We never re-create the card innerHTML after this,
+// otherwise YouTube iframes get destroyed.
+// =========================================================
 function cameraHtml(ffId){
   const cam = CAMERA_URLS[ffId];
   if (!cam){
     return `<div class="cam cam-empty">No camera</div>`;
   }
 
+  // YouTube host (YT API will replace this div)
   if (cam.type === "youtube"){
     return `
-      <div class="cam cam-yt" data-ff="${ffId}" title="Click to open">
-        <div id="yt-${ffId}"></div>
-
-        <div id="tap-${ffId}" class="cam-tap" style="display:none">
-          <button class="cam-tap-btn">Tap to play</button>
-        </div>
-
-        <div class="cam-overlay">LIVE</div>
+      <div class="cam cam-yt" data-ff="${ffId}">
+        <div class="yt-host" id="yt-${ffId}"></div>
       </div>
     `;
   }
 
-  if (!cam.url){
-    return `<div class="cam cam-empty">No camera</div>`;
-  }
-
+  // iframe (FF_A)
   if (cam.type === "iframe"){
     return `
-      <div class="cam" data-ff="${ffId}" title="Click to open">
+      <div class="cam" data-ff="${ffId}">
         <iframe class="cam-iframe" src="${cam.url}" loading="lazy" referrerpolicy="no-referrer"></iframe>
         <div class="cam-overlay">LIVE</div>
       </div>
     `;
   }
 
-  return `
-    <div class="cam" data-ff="${ffId}" title="Click to open">
-      <img class="cam-img" src="${cam.url}" alt="Camera ${ffId}" />
-      <div class="cam-overlay">LIVE</div>
-    </div>
-  `;
-}
-
-function renderUnitCard(ffId){
-  const el = document.getElementById(`card-${ffId}`);
-  if (!el) return;
-
-  const m = state.members[ffId];
-
-  if (!m){
-    el.innerHTML = `
-      <div class="unit-top">
-        <div class="unit-name">${ffId}</div>
-        <span class="pill stale">WAITING</span>
-      </div>
-      <div class="unit-meta">No data yet</div>
-      ${cameraHtml(ffId)}
-      <div class="kpis">
-        <div class="kpi"><div class="v">—</div><div class="l">Pulse</div></div>
-        <div class="kpi"><div class="v">—</div><div class="l">Temp</div></div>
-        <div class="kpi"><div class="v">—</div><div class="l">Smoke</div></div>
-      </div>
-    `;
-  } else {
-    const stale = (m.lastSeenSec ?? 9999) > 12;
-    const pill = stale
-      ? `<span class="pill stale">STALE</span>`
-      : `<span class="pill ${m.severity}">${(m.severity||"ok").toUpperCase()}</span>`;
-
-    const dist = isNum(m.distanceToLeaderM) ? `${Math.round(m.distanceToLeaderM)}m` : "—";
-    const last = (m.lastSeenSec ?? null) === null ? "—" : `${m.lastSeenSec}s`;
-
-    el.innerHTML = `
-      <div class="unit-top">
-        <div class="unit-name">${m.name}</div>
-        ${pill}
-      </div>
-      <div class="unit-meta">
-        <span>${m.ffId}</span>
-        <span>⏱ ${last}</span>
-        <span>📍 ${dist}</span>
-      </div>
-
-      ${cameraHtml(ffId)}
-
-      <div class="kpis">
-        <div class="kpi ${kpiClass(m.pulseLevel)}">
-          <div class="v">${fmt(m.pulse,0)}</div>
-          <div class="l">Pulse</div>
-        </div>
-        <div class="kpi ${kpiClass(m.heatLevel)}">
-          <div class="v">${fmt(m.temp,1)}°C</div>
-          <div class="l">Temp</div>
-        </div>
-        <div class="kpi ${kpiClass(m.smokeLevel)}">
-          <div class="v">${fmt(m.gas,0)}</div>
-          <div class="l">Smoke</div>
-        </div>
+  // mjpeg image
+  if (cam.type === "mjpeg"){
+    return `
+      <div class="cam" data-ff="${ffId}">
+        <img class="cam-img" src="${cam.url}" alt="Camera ${ffId}" />
+        <div class="cam-overlay">LIVE</div>
       </div>
     `;
   }
 
-  // Click card -> zoom map to unit + open popup
-  el.onclick = (ev) => {
+  return `<div class="cam cam-empty">No camera</div>`;
+}
+
+// =========================================================
+// STABLE CARD RENDER (INIT ONCE, UPDATE TEXT ONLY)
+// =========================================================
+function initCardOnce(ffId){
+  const el = document.getElementById(`card-${ffId}`);
+  if (!el || el.dataset.inited) return;
+
+  el.dataset.inited = "1";
+  el.innerHTML = `
+    <div class="unit-top">
+      <div class="unit-name" id="name-${ffId}">${ffId}</div>
+      <span class="pill stale" id="pill-${ffId}">WAITING</span>
+    </div>
+
+    <div class="unit-meta" id="meta-${ffId}">
+      <span>${ffId}</span>
+      <span>⏱ —</span>
+      <span>📍 —</span>
+    </div>
+
+    <div class="cam-slot" id="cam-slot-${ffId}">
+      ${cameraHtml(ffId)}
+    </div>
+
+    <div class="kpis">
+      <div class="kpi" id="kpi-pulse-${ffId}">
+        <div class="v" id="pulse-${ffId}">—</div><div class="l">Pulse</div>
+      </div>
+      <div class="kpi" id="kpi-temp-${ffId}">
+        <div class="v" id="temp-${ffId}">—</div><div class="l">Temp</div>
+      </div>
+      <div class="kpi" id="kpi-smoke-${ffId}">
+        <div class="v" id="smoke-${ffId}">—</div><div class="l">Smoke</div>
+      </div>
+    </div>
+  `;
+
+  // Card click -> zoom (but ignore cam clicks)
+  el.addEventListener("click", (ev) => {
     const camEl = ev.target?.closest?.(".cam");
     if (camEl) return;
-
     const m2 = state.members[ffId];
     if (m2 && isNum(m2.lat) && isNum(m2.lon)){
       map.setView([m2.lat, m2.lon], 19);
       markers[ffId]?.openPopup();
     }
-  };
+  });
 
-  // Click camera -> either play YT (user gesture) or open stream
-  const camEl = el.querySelector(".cam");
-  if (camEl){
-    camEl.addEventListener("click", (e) => {
+  // Cam click -> open new tab
+  const cam = el.querySelector(".cam");
+  if (cam){
+    cam.addEventListener("click", (e) => {
       e.stopPropagation();
-
-      if (CAMERA_URLS[ffId]?.type === "youtube"){
-        userPlay(ffId);   // user gesture enables autoplay
-        return;
-      }
-
       openCamera(ffId);
     });
   }
+}
 
-  // After rendering, init YT players if needed (cards are re-rendered often)
-  if (CAMERA_URLS[ffId]?.type === "youtube"){
-    tryInitAllYouTubePlayers();
+function updateCard(ffId){
+  initCardOnce(ffId);
+
+  const m = state.members[ffId];
+
+  const nameEl = document.getElementById(`name-${ffId}`);
+  const pillEl = document.getElementById(`pill-${ffId}`);
+  const metaEl = document.getElementById(`meta-${ffId}`);
+
+  const pulseEl = document.getElementById(`pulse-${ffId}`);
+  const tempEl  = document.getElementById(`temp-${ffId}`);
+  const smokeEl = document.getElementById(`smoke-${ffId}`);
+
+  const kpiPulse = document.getElementById(`kpi-pulse-${ffId}`);
+  const kpiTemp  = document.getElementById(`kpi-temp-${ffId}`);
+  const kpiSmoke = document.getElementById(`kpi-smoke-${ffId}`);
+
+  if (!m){
+    if (nameEl) nameEl.textContent = ffId;
+    if (pillEl){
+      pillEl.className = "pill stale";
+      pillEl.textContent = "WAITING";
+    }
+    if (metaEl) metaEl.innerHTML = `<span>${ffId}</span><span>⏱ —</span><span>📍 —</span>`;
+    if (pulseEl) pulseEl.textContent = "—";
+    if (tempEl) tempEl.textContent  = "—";
+    if (smokeEl) smokeEl.textContent = "—";
+    if (kpiPulse) kpiPulse.className = "kpi";
+    if (kpiTemp)  kpiTemp.className  = "kpi";
+    if (kpiSmoke) kpiSmoke.className = "kpi";
+    return;
   }
+
+  const stale = (m.lastSeenSec ?? 9999) > 12;
+  if (nameEl) nameEl.textContent = m.name || ffId;
+
+  if (pillEl){
+    pillEl.className = stale ? "pill stale" : `pill ${m.severity || "ok"}`;
+    pillEl.textContent = stale ? "STALE" : (m.severity || "ok").toUpperCase();
+  }
+
+  const dist = isNum(m.distanceToLeaderM) ? `${Math.round(m.distanceToLeaderM)}m` : "—";
+  const last = (m.lastSeenSec ?? null) === null ? "—" : `${m.lastSeenSec}s`;
+  if (metaEl){
+    metaEl.innerHTML = `<span>${m.ffId}</span><span>⏱ ${last}</span><span>📍 ${dist}</span>`;
+  }
+
+  if (pulseEl) pulseEl.textContent = isNum(m.pulse) ? `${Math.round(m.pulse)}` : "—";
+  if (tempEl)  tempEl.textContent  = isNum(m.temp)  ? `${m.temp.toFixed(1)}°C` : "—";
+  if (smokeEl) smokeEl.textContent = isNum(m.gas)   ? `${Math.round(m.gas)}` : "—";
+
+  if (kpiPulse) kpiPulse.className = `kpi ${kpiClass(m.pulseLevel)}`;
+  if (kpiTemp)  kpiTemp.className  = `kpi ${kpiClass(m.heatLevel)}`;
+  if (kpiSmoke) kpiSmoke.className = `kpi ${kpiClass(m.smokeLevel)}`;
 }
 
 function renderAllCards(){
-  FF_ORDER.forEach(renderUnitCard);
+  FF_ORDER.forEach(updateCard);
 }
 
 // =========================================================
@@ -644,6 +508,99 @@ function renderAlerts(){
 }
 
 // =========================================================
+// YOUTUBE IFRAME API — create ONCE and keep playing
+// =========================================================
+let ytReady = false;
+const ytPlayers = {};     // ffId -> YT.Player
+const ytLoopTimers = {};  // ffId -> interval id
+
+function loadYouTubeAPI(){
+  if (window.YT && window.YT.Player) {
+    ytReady = true;
+    initAllYouTubePlayers();
+    return;
+  }
+  if (document.getElementById("yt-api")) return;
+
+  const s = document.createElement("script");
+  s.id = "yt-api";
+  s.src = "https://www.youtube.com/iframe_api";
+  document.head.appendChild(s);
+
+  window.onYouTubeIframeAPIReady = () => {
+    ytReady = true;
+    initAllYouTubePlayers();
+  };
+}
+
+function ensureYTPlayer(ffId){
+  const cam = CAMERA_URLS[ffId];
+  if (!cam || cam.type !== "youtube") return;
+  if (!ytReady) return;
+  if (ytPlayers[ffId]) return;
+
+  const hostId = `yt-${ffId}`;
+  const host = document.getElementById(hostId);
+  if (!host) return; // card not built yet
+
+  const start = cam.start ?? 0;
+  const end = start + (cam.dur ?? 40);
+
+  ytPlayers[ffId] = new YT.Player(hostId, {
+    width: "100%",
+    height: "100%",
+    videoId: cam.videoId,
+    playerVars: {
+      autoplay: 1,
+      controls: 0,
+      mute: 1,           // autoplay needs mute
+      playsinline: 1,
+      rel: 0,
+      modestbranding: 1,
+      start: start,
+    },
+    events: {
+      onReady: (e) => {
+        try {
+          e.target.mute();
+          e.target.seekTo(start, true);
+          e.target.playVideo();
+        } catch {}
+
+        // Loop inside [start, end)
+        if (ytLoopTimers[ffId]) clearInterval(ytLoopTimers[ffId]);
+        ytLoopTimers[ffId] = setInterval(() => {
+          const p = ytPlayers[ffId];
+          if (!p || typeof p.getCurrentTime !== "function") return;
+          const t = p.getCurrentTime();
+          if (t >= end - 0.2) {
+            try {
+              p.seekTo(start, true);
+              p.playVideo();
+            } catch {}
+          }
+        }, 250);
+      },
+      onStateChange: (e) => {
+        // If paused/buffered, try to resume (best effort)
+        // 2 = paused, 3 = buffering
+        if (e.data === 2 || e.data === 3) {
+          const p = e.target;
+          try { p.playVideo(); } catch {}
+        }
+      }
+    }
+  });
+}
+
+function initAllYouTubePlayers(){
+  // ensure cards exist first
+  renderAllCards();
+  // create players for the 3 youtube units
+  ["FF_B","FF_C","FF_D"].forEach(ensureYTPlayer);
+}
+
+// =========================================================
 // MQTT
 // =========================================================
 function connectMQTT(){
@@ -670,13 +627,18 @@ function connectMQTT(){
       state.members[msg.ffId] = msg;
       upsertMarker(msg);
 
+      // update only text (card is stable)
       scheduleRender();
       maybeCenterOnLeader();
+
+      // after first data, ensure YT players exist
+      if (msg.ffId === "FF_B" || msg.ffId === "FF_C" || msg.ffId === "FF_D"){
+        ensureYTPlayer(msg.ffId);
+      }
     }
 
     if (topic.includes("edge/alerts")){
       if (!msg.ffId) return;
-
       state.alertsByFf[msg.ffId] = msg;
       renderAlerts();
     }
@@ -711,7 +673,13 @@ function initMap(){
     btnAll.onclick = () => fitToEveryone();
   }
 
+  // Build cards once immediately (so YT host divs exist)
   renderAllCards();
+
+  // Start YT API load
+  loadYouTubeAPI();
+
+  // Alerts init
   renderAlerts();
 }
 

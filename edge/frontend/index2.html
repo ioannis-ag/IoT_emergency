@@ -37,11 +37,17 @@
           <div class="panel-head">
             <div>
               <div class="ph-title">Sector Map</div>
-              <div class="ph-sub">Centered on leader automatically</div>
+              <div class="ph-sub">
+                Centered on leader automatically
+                <span id="incidentText" style="margin-left:10px; color:#ef4444; font-weight:900;"></span>
+              </div>
             </div>
             <div class="actions">
               <button class="btn ghost" id="btnRecenter">
                 <i class="fa-solid fa-location-crosshairs"></i> Recenter Leader
+              </button>
+              <button class="btn ghost" id="btnShowAll">
+                <i class="fa-solid fa-users"></i> Show Everyone
               </button>
             </div>
           </div>
@@ -56,7 +62,7 @@
           <div class="panel unit-card" id="card-FF_D"></div>
         </aside>
 
-        <!-- ALERTS (full-width bottom) -->
+        <!-- ALERTS -->
         <div class="panel alerts-panel" id="alertsPanel">
           <div class="alerts-head" id="alertsHead">
             <div class="ah-left">
@@ -75,13 +81,16 @@
         </div>
       </div>
 
-      <!-- Toast (for new alerts only) -->
       <div id="toast" class="toast hidden"></div>
     </main>
   </div>
 
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
   <script src="https://unpkg.com/mqtt/dist/mqtt.min.js"></script>
+
+  <!-- ✅ Needed for start/end/loop segments -->
+  <script src="https://www.youtube.com/iframe_api"></script>
+
   <script src="app.js"></script>
 </body>
 </html>

@@ -39,9 +39,8 @@
       <button class="tab-btn active" data-page="map"><i class="fa-solid fa-map"></i> Map</button>
       <button class="tab-btn" data-page="team"><i class="fa-solid fa-people-group"></i> Team</button>
       <button class="tab-btn" data-page="risk"><i class="fa-solid fa-shield-halved"></i> Risk</button>
-
       <button class="tab-btn" data-page="medical"><i class="fa-solid fa-heart-pulse"></i> Medical</button>
-<button class="tab-btn" data-page="alerts"><i class="fa-solid fa-triangle-exclamation"></i> Alerts</button>
+      <button class="tab-btn" data-page="alerts"><i class="fa-solid fa-triangle-exclamation"></i> Alerts</button>
     </nav>
 
     <main class="content">
@@ -221,6 +220,12 @@
                 loading="lazy"
                 referrerpolicy="no-referrer"
               ></iframe>
+
+              <div class="placeholder" id="tempSeriesPlaceholder">
+                <div class="ph-title" style="margin-top:10px;">Temperature Time Series</div>
+                <div class="ph-sub">Placeholder (Grafana panel later)</div>
+                <div class="placeholder-box"></div>
+              </div>
             </div>
           </div>
 
@@ -228,135 +233,209 @@
           <div class="panel metrics-panel">
             <div class="panel-head">
               <div>
-                <div class="ph-title">Key Metrics</div>
-                <div class="ph-sub">Fast operator view</div>
+                <div class="ph-title">Operator Metrics</div>
+                <div class="ph-sub">Real-time indexes + environment snapshot</div>
               </div>
             </div>
             <div class="panel-body">
-              <div class="metrics-grid">
-                <div class="metric-card" id="mStress">
-                  <div class="m-v" id="stressVal">—</div>
+              <div class="metrics-grid" id="indexCards">
+                <div class="metric-card">
+                  <div class="m-v big" id="idxHr">—</div>
+                  <div class="m-l">Heart Rate</div>
+                </div>
+                <div class="metric-card">
+                  <div class="m-v" id="idxRisk">—</div>
+                  <div class="m-l">Risk Score</div>
+                </div>
+                <div class="metric-card">
+                  <div class="m-v" id="idxStress">—</div>
                   <div class="m-l">Stress Index</div>
                 </div>
-                <div class="metric-card" id="mTemp">
-                  <div class="m-v" id="tempVal">—</div>
-                  <div class="m-l">Temperature</div>
-                </div>
-                <div class="metric-card" id="mSmoke">
-                  <div class="m-v" id="smokeVal">—</div>
-                  <div class="m-l">Smoke</div>
-                </div>
-                <div class="metric-card" id="mDist">
-                  <div class="m-v" id="distVal">—</div>
-                  <div class="m-l">To Leader</div>
+                <div class="metric-card">
+                  <div class="m-v" id="idxFatigue">—</div>
+                  <div class="m-l">Fatigue Index</div>
                 </div>
               </div>
+
+              <div class="divider"></div>
+
+              <div class="env-grid" id="envCards">
+                <div class="env-row">
+                  <div class="env-k">Temp</div><div class="env-v" id="envTemp">—</div>
+                </div>
+                <div class="env-row">
+                  <div class="env-k">Humidity</div><div class="env-v" id="envHum">—</div>
+                </div>
+                <div class="env-row">
+                  <div class="env-k">CO (ppm)</div><div class="env-v" id="envCo">—</div>
+                </div>
+                <div class="env-row">
+                  <div class="env-k">MQ2 raw</div><div class="env-v" id="envMq2">—</div>
+                </div>
+                <div class="env-row">
+                  <div class="env-k">To Leader</div><div class="env-v" id="distVal">—</div>
+                </div>
+              </div>
+
               <div class="hint" id="metricsHint">—</div>
             </div>
           </div>
         </div>
       </section>
 
-      <!-- RISK PAGE (placeholder) -->
+      <!-- RISK PAGE -->
       <section id="page-risk" class="page">
         <div class="page-title">
           <div class="h1">Risk</div>
-          <div class="sub">Policy + thresholds (placeholder)</div>
+          <div class="sub">Command-level operational risk view</div>
         </div>
 
-        <div class="panel">
-          <div class="panel-head">
-            <div>
-              <div class="ph-title">Risk Engine</div>
-              <div class="ph-sub">Tune this later</div>
+        <div class="risk-grid">
+          <div class="panel">
+            <div class="panel-head">
+              <div>
+                <div class="ph-title">Team Risk</div>
+                <div class="ph-sub">Aggregate + worst unit</div>
+              </div>
+              <span class="badge ok" id="teamRiskBadge">—</span>
+            </div>
+            <div class="panel-body">
+              <div class="metrics-grid">
+                <div class="metric-card">
+                  <div class="m-v" id="teamRiskVal">—</div>
+                  <div class="m-l">Overall Risk</div>
+                </div>
+                <div class="metric-card">
+                  <div class="m-v" id="worstUnitVal">—</div>
+                  <div class="m-l">Worst Unit</div>
+                </div>
+              </div>
+
+              <div class="divider"></div>
+
+              <div class="row-actions">
+                <button class="btn danger" id="btnEvacuateTeam"><i class="fa-solid fa-person-running"></i> Evacuate Team</button>
+                <button class="btn" id="btnMedicalSelected"><i class="fa-solid fa-kit-medical"></i> Medical Attention – Selected FF</button>
+              </div>
+
+              <div class="hint" id="riskHint">Actions are POSTed to <code>/api/action</code> and shown in Alerts history.</div>
             </div>
           </div>
-          <div class="panel-body">
-            <div class="hint">
-              This page is ready for your rule explanations, threshold controls, and audit logs.
+
+          <div class="panel">
+            <div class="panel-head">
+              <div>
+                <div class="ph-title">Per Firefighter</div>
+                <div class="ph-sub">Risk processor outputs (latest)</div>
+              </div>
+              <span class="pill ok" id="riskSelectedPill">Selected: FF_A</span>
+            </div>
+            <div class="panel-body">
+              <div style="overflow:auto">
+                <table class="table" id="riskTable">
+                  <thead>
+                    <tr>
+                      <th>FF</th>
+                      <th>Risk</th>
+                      <th>Heat</th>
+                      <th>Gas</th>
+                      <th>Sep</th>
+                      <th>Stress</th>
+                      <th>Fatigue</th>
+                    </tr>
+                  </thead>
+                  <tbody id="riskTbody">
+                    <tr><td colspan="7" class="small">Waiting for data…</td></tr>
+                  </tbody>
+                </table>
+              </div>
+
+              <div class="hint small">Tip: click a row to select the firefighter for actions.</div>
             </div>
           </div>
         </div>
       </section>
 
-      <!-- ALERTS PAGE (placeholder) -->
+      <!-- ALERTS PAGE -->
       <section id="page-alerts" class="page">
         <div class="page-title">
           <div class="h1">Alerts</div>
-          <div class="sub">All alerts stream (placeholder)</div>
+          <div class="sub">Alert history + command actions</div>
         </div>
 
         <div class="panel">
           <div class="panel-head">
             <div>
-              <div class="ph-title">Alert Log</div>
-              <div class="ph-sub">Latest first</div>
+              <div class="ph-title">Alert & Action Log</div>
+              <div class="ph-sub">Newest first</div>
             </div>
-            <span class="badge ok" id="alertsBadge">NOMINAL</span>
+            <span class="badge ok" id="alertsBadge">—</span>
           </div>
-          <div class="panel-body" id="alertsLog">
-            <div class="hint">Hook to your backend or MQTT alerts topic here.</div>
+          <div class="panel-body">
+            <div class="log" id="alertsLog">
+              <div class="hint">Loading…</div>
+            </div>
           </div>
         </div>
       </section>
 
-    <!-- ===================== MEDICAL PAGE ===================== -->
-    <section class="page" id="page-medical">
-      <div class="page-head">
-        <div>
-          <h2>Medical</h2>
-          <div class="subtle">Live ECG (MQTT) + detailed HR/HRV & demo indexes (not medical).</div>
-        </div>
-        <div class="row gap">
-          <label class="pill">
-            Team
-            <select id="med-team">
-              <option value="Team_A">Team_A</option>
-            </select>
-          </label>
-          <label class="pill">
-            Firefighter
-            <select id="med-ff">
-              <option value="FF_A">FF_A</option>
-              <option value="FF_B">FF_B</option>
-              <option value="FF_C">FF_C</option>
-              <option value="FF_D">FF_D</option>
-            </select>
-          </label>
-          <button class="btn" id="btn-ecg-connect">Connect ECG</button>
-          <button class="btn danger" id="btn-medical-action">Request Medical</button>
-        </div>
-      </div>
-
-      <div class="grid-2">
-        <div class="card">
-          <div class="card-title">ECG Waveform (last ~12s)</div>
-          <div class="subtle" id="ecg-status">Disconnected</div>
-          <canvas id="ecg-canvas" width="900" height="260" class="canvas"></canvas>
-          <div class="subtle">
-            Source: WebSocket <code>/ws/ecg?team=...&ff=...</code> (backend subscribes to MQTT <code>raw/ECG/&lt;team&gt;/&lt;ff&gt;</code>).
+      <!-- ===================== MEDICAL PAGE ===================== -->
+      <section class="page" id="page-medical">
+        <div class="page-head">
+          <div>
+            <h2>Medical</h2>
+            <div class="subtle">Live ECG (MQTT) + detailed HR/HRV & demo indexes (not medical).</div>
+          </div>
+          <div class="row gap">
+            <label class="pill">
+              Team
+              <select id="med-team">
+                <option value="Team_A">Team_A</option>
+              </select>
+            </label>
+            <label class="pill">
+              Firefighter
+              <select id="med-ff">
+                <option value="FF_A">FF_A</option>
+                <option value="FF_B">FF_B</option>
+                <option value="FF_C">FF_C</option>
+                <option value="FF_D">FF_D</option>
+              </select>
+            </label>
+            <button class="btn" id="btn-ecg-connect">Connect ECG</button>
+            <button class="btn danger" id="btn-medical-action">Request Medical</button>
           </div>
         </div>
 
-        <div class="card">
-          <div class="card-title">Medical Metrics</div>
-          <div class="mini-grid" id="medical-metrics"></div>
+        <div class="grid-2">
+          <div class="card">
+            <div class="card-title">ECG Waveform (last ~12s)</div>
+            <div class="subtle" id="ecg-status">Disconnected</div>
+            <canvas id="ecg-canvas" width="900" height="260" class="canvas"></canvas>
+            <div class="subtle">
+              Source: WebSocket <code>/ws/ecg?team=...&ff=...</code> (backend subscribes to MQTT <code>raw/ECG/&lt;team&gt;/&lt;ff&gt;</code>).
+            </div>
+          </div>
 
-          <div class="card-divider"></div>
+          <div class="card">
+            <div class="card-title">Medical Metrics</div>
+            <div class="mini-grid" id="medical-metrics"></div>
 
-          <div class="card-title">Indexes (demo)</div>
-          <div class="bar-list" id="medical-bars"></div>
+            <div class="card-divider"></div>
 
-          <div class="card-divider"></div>
+            <div class="card-title">Indexes (demo)</div>
+            <div class="bar-list" id="medical-bars"></div>
 
-          <div class="card-title">Polar RR/HR evaluation</div>
-          <div class="subtle">These come from your normal pipeline (Orion → Influx → API), not from ECG decoding.</div>
-          <div class="mini-grid" id="polar-metrics"></div>
+            <div class="card-divider"></div>
+
+            <div class="card-title">Polar RR/HR evaluation</div>
+            <div class="subtle">These come from your normal pipeline (Orion → Influx → API), not from ECG decoding.</div>
+            <div class="mini-grid" id="polar-metrics"></div>
+          </div>
         </div>
-      </div>
-    </section>
+      </section>
 
-</main>
+    </main>
   </div>
 
   <!-- Libraries -->

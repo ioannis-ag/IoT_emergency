@@ -42,6 +42,21 @@ const GRAFANA = {
   TEMP_PANEL_BY_FF: { FF_A: 5, FF_B: 6, FF_C: 7, FF_D: 8 },
 };
 
+const VIDEO = {
+  FF_A: { type: "iframe", url: "http://192.168.2.13:8889/cam" },
+
+  // YouTube: B starts at 0:10, C at 1:10, D at 2:10
+  // Each loops a 60s segment: [start, start+60]
+  YT_VIDEO_ID: "mphHFk5IXsQ",
+  SEG_SECONDS: 60,
+
+  START_BY_FF: {
+    FF_B: 10,
+    FF_C: 70,
+    FF_D: 130,
+  },
+};
+
 const FF_NAMES = {
   FF_A: "Alex (Leader)",
   FF_B: "Maria",
@@ -656,6 +671,65 @@ function updateGrafanaFrames(force = false) {
   }
 }
 
+function ytEmbedUrl(videoId, startSec, endSec) {
+  const params = new URLSearchParams();
+  params.set("enablejsapi", "1");
+  params.set("origin", window.location.origin);
+  params.set("autoplay", "1");
+  params.set("mute", "1");            // avoids autoplay blocking
+  params.set("controls", "0");
+  params.set("rel", "0");
+  params.set("modestbranding", "1");
+  params.set("playsinline", "1");
+
+  // Start/end define the segment; loop requires playlist=<id> + loop=1
+  params.set("start", String(Math.max(0, Math.floor(startSec))));
+  params.set("end", String(Math.max(0, Math.floor(endSec))));
+  params.set("loop", "1");
+  params.set("playlist", videoId);
+
+  return `https://www.youtube.com/embed/${encodeURIComponent(videoId)}?${params.toString()}`;
+}
+
+function setVideoHint(text) {
+  const el = document.getElementById("videoHint");
+  if (el) el.textContent = text || "—";
+}
+
+// Updates the Team tab video based on selectedFF
+function updateTeamVideo(force = false) {
+  const frame = document.getElementById("teamVideoFrame");
+  if (!frame) return;
+
+  const ff = state.selectedFF;
+
+  // Store last video src to avoid flicker/reloads when not changing FF
+  if (!state.video) state.video = { lastFf: null, lastSrc: "" };
+
+  let src = "about:blank";
+  let hint = "";
+
+  if (ff === "FF_A") {
+    src = VIDEO.FF_A.url;
+    hint = "FF_A live feed (mtxmedia).";
+  } else if (ff === "FF_B" || ff === "FF_C" || ff === "FF_D") {
+    const start = VIDEO.START_BY_FF[ff] ?? 0;
+    const end = start + VIDEO.SEG_SECONDS;
+    src = ytEmbedUrl(VIDEO.YT_VIDEO_ID, start);
+    hint = `${ff} demo feed (YouTube segment ${start}s → ${end}s, loops).`;
+  } else {
+    hint = "No video source for this unit.";
+  }
+
+  if (force || state.video.lastFf !== ff || state.video.lastSrc !== src) {
+    frame.src = src;
+    state.video.lastFf = ff;
+    state.video.lastSrc = src;
+    setVideoHint(hint);
+  }
+}
+
+
 /* ---------------- Team page ---------------- */
 
 async function updateTeamPage() {
@@ -720,6 +794,7 @@ async function updateTeamPage() {
     if (big) big.innerHTML = `<div class="ff-status-title">Status: Safe</div><div class="ff-status-desc">No immediate risk detected.</div>`;
   }
 
+  updateTeamVideo(false);
   updateGrafanaFrames(false);
 }
 
@@ -779,6 +854,7 @@ function updateRiskPage() {
         );
 
         updateGrafanaFrames(true);
+        updateTeamVideo(true);
 
         updateRiskPage();
         if (state.page === "team") updateTeamPage();
@@ -1198,10 +1274,12 @@ document.addEventListener("DOMContentLoaded", () => {
       state.selectedFF = "FF_A";
       document.querySelectorAll(".subtab").forEach((b) => b.classList.toggle("active", b.dataset.ff === "FF_A"));
       updateGrafanaFrames(true);
+      updateTeamVideo(true);
       showPage("team");
     });
   });
 
+  updateTeamVideo(true);
   updateGrafanaFrames(true);
 
   // force a weather try immediately on load (don’t wait 5 minutes)

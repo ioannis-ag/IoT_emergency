@@ -1,0 +1,368 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Command Center</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+
+  <!-- Leaflet (map) -->
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <!-- Font Awesome (icons) -->
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+  <!-- App styles -->
+  <link rel="stylesheet" href="styles.css" />
+</head>
+
+<body>
+  <div id="app">
+    <!-- Top bar -->
+    <header class="topbar">
+      <div class="brand">
+        <div class="brand-icon"><i class="fa-solid fa-shield-heart"></i></div>
+        <div class="brand-text">
+          <div class="brand-title">SMART FIRE COMMAND</div>
+          <div class="brand-sub">Command Center</div>
+        </div>
+      </div>
+
+      <div class="top-right">
+        <div id="connectionStatus" class="conn">
+          <span class="dot"></span>
+          <span class="conn-text">MQTT Connecting…</span>
+        </div>
+        <div id="clock" class="clock">—</div>
+      </div>
+    </header>
+
+    <!-- Primary Tabs -->
+    <nav class="tabs">
+      <button class="tab-btn active" data-page="map"><i class="fa-solid fa-map"></i> Map</button>
+      <button class="tab-btn" data-page="team"><i class="fa-solid fa-people-group"></i> Team</button>
+      <button class="tab-btn" data-page="risk"><i class="fa-solid fa-shield-halved"></i> Risk</button>
+
+      <button class="tab-btn" data-page="medical"><i class="fa-solid fa-heart-pulse"></i> Medical</button>
+<button class="tab-btn" data-page="alerts"><i class="fa-solid fa-triangle-exclamation"></i> Alerts</button>
+    </nav>
+
+    <main class="content">
+      <!-- DASHBOARD (Map tab) -->
+      <section id="page-map" class="page active">
+        <div class="page-title">
+          <div class="h1">Dashboard</div>
+          <div class="sub">Live overview • Patras sector</div>
+        </div>
+
+        <div class="dash-grid">
+          <!-- LEFT: Map -->
+          <div class="panel map-panel">
+            <div class="panel-head">
+              <div>
+                <div class="ph-title">Operations Map</div>
+                <div class="ph-sub">Units + team footprints</div>
+              </div>
+              <div class="actions">
+                <button class="btn ghost" id="btnRecenterLeader">
+                  <i class="fa-solid fa-location-crosshairs"></i> Leader
+                </button>
+              </div>
+            </div>
+            <div id="mainMap" class="map"></div>
+          </div>
+
+          <!-- RIGHT: Weather Risk + Team Status -->
+          <aside class="right-stack">
+            <div class="panel">
+              <div class="panel-head">
+                <div>
+                  <div class="ph-title">Weather Risk</div>
+                  <div class="ph-sub">Local operational context</div>
+                </div>
+                <span class="badge ok" id="weatherBadge">—</span>
+              </div>
+              <div class="panel-body">
+                <div class="weather-row">
+                  <div class="weather-kpi">
+                    <div class="kpi-v" id="wxTemp">—</div>
+                    <div class="kpi-l">Temperature</div>
+                  </div>
+                  <div class="weather-kpi">
+                    <div class="kpi-v" id="wxWind">—</div>
+                    <div class="kpi-l">Wind</div>
+                  </div>
+                  <div class="weather-kpi">
+                    <div class="kpi-v" id="wxHum">—</div>
+                    <div class="kpi-l">Humidity</div>
+                  </div>
+                </div>
+
+                <div class="hint" id="wxHint">
+                  Weather updates from leader (FF_A) every ~5 minutes.
+                </div>
+              </div>
+            </div>
+
+            <div class="panel">
+              <div class="panel-head">
+                <div>
+                  <div class="ph-title">Team Status</div>
+                  <div class="ph-sub">Worst unit condition</div>
+                </div>
+                <span class="badge ok" id="teamStatusBadge">NOMINAL</span>
+              </div>
+              <div class="panel-body">
+                <div class="status-big" id="teamStatusBox">
+                  <div class="status-title">All Systems Nominal</div>
+                  <div class="status-desc">No active critical conditions detected.</div>
+                </div>
+              </div>
+            </div>
+          </aside>
+
+          <!-- BOTTOM: Teams A/B then C/D -->
+          <div class="panel teams-panel">
+            <div class="panel-head">
+              <div>
+                <div class="ph-title">Teams</div>
+                <div class="ph-sub">Quick team tiles</div>
+              </div>
+              <div class="meta" id="teamsMeta">—</div>
+            </div>
+
+            <div class="panel-body">
+              <div class="teams-grid">
+                <div class="team-tile" id="teamTileA" data-team="Team_A">
+                  <div class="tile-top">
+                    <div class="tile-title">Team A</div>
+                    <span class="pill ok" id="tileBadgeA">OK</span>
+                  </div>
+                  <div class="tile-sub" id="tileSubA">—</div>
+                </div>
+
+                <div class="team-tile" id="teamTileB" data-team="Team_B">
+                  <div class="tile-top">
+                    <div class="tile-title">Team B</div>
+                    <span class="pill ok" id="tileBadgeB">OK</span>
+                  </div>
+                  <div class="tile-sub" id="tileSubB">—</div>
+                </div>
+
+                <div class="team-tile" id="teamTileC" data-team="Team_C">
+                  <div class="tile-top">
+                    <div class="tile-title">Team C</div>
+                    <span class="pill ok" id="tileBadgeC">OK</span>
+                  </div>
+                  <div class="tile-sub" id="tileSubC">—</div>
+                </div>
+
+                <div class="team-tile" id="teamTileD" data-team="Team_D">
+                  <div class="tile-top">
+                    <div class="tile-title">Team D</div>
+                    <span class="pill ok" id="tileBadgeD">OK</span>
+                  </div>
+                  <div class="tile-sub" id="tileSubD">—</div>
+                </div>
+              </div>
+
+              <div class="hint">
+                Tip: click a Team tile to jump into the Team page (demo focuses Team A).
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- TEAM PAGE -->
+      <section id="page-team" class="page">
+        <div class="page-title">
+          <div class="h1">Team</div>
+          <div class="sub">Firefighter detail • vitals + risk</div>
+        </div>
+
+        <!-- FF tabs -->
+        <div class="subtabs" id="ffTabs">
+          <button class="subtab active" data-ff="FF_A">FF_A</button>
+          <button class="subtab" data-ff="FF_B">FF_B</button>
+          <button class="subtab" data-ff="FF_C">FF_C</button>
+          <button class="subtab" data-ff="FF_D">FF_D</button>
+        </div>
+
+        <div class="team-grid">
+          <!-- Big status box -->
+          <div class="panel status-panel">
+            <div class="panel-head">
+              <div>
+                <div class="ph-title">Selected Firefighter</div>
+                <div class="ph-sub" id="ffNameSub">—</div>
+              </div>
+              <span class="badge ok" id="ffStatusBadge">SAFE</span>
+            </div>
+            <div class="panel-body">
+              <div class="ff-status-big" id="ffStatusBig">
+                <div class="ff-status-title">Status: Safe</div>
+                <div class="ff-status-desc">No immediate risk detected.</div>
+              </div>
+            </div>
+          </div>
+
+          <!-- HR panel embed -->
+          <div class="panel chart-panel">
+            <div class="panel-head">
+              <div>
+                <div class="ph-title">Heart Rate</div>
+                <div class="ph-sub">Grafana embedded panel (per-FF)</div>
+              </div>
+              <span class="pill ok" id="hrPill">—</span>
+            </div>
+            <div class="panel-body">
+              <iframe
+                id="hrGrafanaFrame"
+                class="grafana-frame"
+                src="about:blank"
+                loading="lazy"
+                referrerpolicy="no-referrer"
+              ></iframe>
+            </div>
+          </div>
+
+          <!-- Right metric boxes -->
+          <div class="panel metrics-panel">
+            <div class="panel-head">
+              <div>
+                <div class="ph-title">Key Metrics</div>
+                <div class="ph-sub">Fast operator view</div>
+              </div>
+            </div>
+            <div class="panel-body">
+              <div class="metrics-grid">
+                <div class="metric-card" id="mStress">
+                  <div class="m-v" id="stressVal">—</div>
+                  <div class="m-l">Stress Index</div>
+                </div>
+                <div class="metric-card" id="mTemp">
+                  <div class="m-v" id="tempVal">—</div>
+                  <div class="m-l">Temperature</div>
+                </div>
+                <div class="metric-card" id="mSmoke">
+                  <div class="m-v" id="smokeVal">—</div>
+                  <div class="m-l">Smoke</div>
+                </div>
+                <div class="metric-card" id="mDist">
+                  <div class="m-v" id="distVal">—</div>
+                  <div class="m-l">To Leader</div>
+                </div>
+              </div>
+              <div class="hint" id="metricsHint">—</div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- RISK PAGE (placeholder) -->
+      <section id="page-risk" class="page">
+        <div class="page-title">
+          <div class="h1">Risk</div>
+          <div class="sub">Policy + thresholds (placeholder)</div>
+        </div>
+
+        <div class="panel">
+          <div class="panel-head">
+            <div>
+              <div class="ph-title">Risk Engine</div>
+              <div class="ph-sub">Tune this later</div>
+            </div>
+          </div>
+          <div class="panel-body">
+            <div class="hint">
+              This page is ready for your rule explanations, threshold controls, and audit logs.
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ALERTS PAGE (placeholder) -->
+      <section id="page-alerts" class="page">
+        <div class="page-title">
+          <div class="h1">Alerts</div>
+          <div class="sub">All alerts stream (placeholder)</div>
+        </div>
+
+        <div class="panel">
+          <div class="panel-head">
+            <div>
+              <div class="ph-title">Alert Log</div>
+              <div class="ph-sub">Latest first</div>
+            </div>
+            <span class="badge ok" id="alertsBadge">NOMINAL</span>
+          </div>
+          <div class="panel-body" id="alertsLog">
+            <div class="hint">Hook to your backend or MQTT alerts topic here.</div>
+          </div>
+        </div>
+      </section>
+
+    <!-- ===================== MEDICAL PAGE ===================== -->
+    <section class="page" id="page-medical">
+      <div class="page-head">
+        <div>
+          <h2>Medical</h2>
+          <div class="subtle">Live ECG (MQTT) + detailed HR/HRV & demo indexes (not medical).</div>
+        </div>
+        <div class="row gap">
+          <label class="pill">
+            Team
+            <select id="med-team">
+              <option value="Team_A">Team_A</option>
+            </select>
+          </label>
+          <label class="pill">
+            Firefighter
+            <select id="med-ff">
+              <option value="FF_A">FF_A</option>
+              <option value="FF_B">FF_B</option>
+              <option value="FF_C">FF_C</option>
+              <option value="FF_D">FF_D</option>
+            </select>
+          </label>
+          <button class="btn" id="btn-ecg-connect">Connect ECG</button>
+          <button class="btn danger" id="btn-medical-action">Request Medical</button>
+        </div>
+      </div>
+
+      <div class="grid-2">
+        <div class="card">
+          <div class="card-title">ECG Waveform (last ~12s)</div>
+          <div class="subtle" id="ecg-status">Disconnected</div>
+          <canvas id="ecg-canvas" width="900" height="260" class="canvas"></canvas>
+          <div class="subtle">
+            Source: WebSocket <code>/ws/ecg?team=...&ff=...</code> (backend subscribes to MQTT <code>raw/ECG/&lt;team&gt;/&lt;ff&gt;</code>).
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-title">Medical Metrics</div>
+          <div class="mini-grid" id="medical-metrics"></div>
+
+          <div class="card-divider"></div>
+
+          <div class="card-title">Indexes (demo)</div>
+          <div class="bar-list" id="medical-bars"></div>
+
+          <div class="card-divider"></div>
+
+          <div class="card-title">Polar RR/HR evaluation</div>
+          <div class="subtle">These come from your normal pipeline (Orion → Influx → API), not from ECG decoding.</div>
+          <div class="mini-grid" id="polar-metrics"></div>
+        </div>
+      </div>
+    </section>
+
+</main>
+  </div>
+
+  <!-- Libraries -->
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
+  <!-- App -->
+  <script src="app.js"></script>
+</body>
+</html>

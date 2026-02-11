@@ -208,7 +208,6 @@
             <div class="panel-head">
               <div>
                 <div class="ph-title">Heart Rate</div>
-                <div class="ph-sub">Grafana embedded panel (per-FF)</div>
               </div>
               <span class="pill ok" id="hrPill">—</span>
             </div>
@@ -221,11 +220,21 @@
                 referrerpolicy="no-referrer"
               ></iframe>
 
-              <div class="placeholder" id="tempSeriesPlaceholder">
-                <div class="ph-title" style="margin-top:10px;">Temperature Time Series</div>
-                <div class="ph-sub">Placeholder (Grafana panel later)</div>
-                <div class="placeholder-box"></div>
+            <div class="panel-head" style="padding:0;border:0;background:transparent;margin-top:10px">
+              <div>
+                <div class="ph-title">Temperature</div>
               </div>
+              <span class="pill ok" id="tempPill">—</span>
+            </div>
+
+            <iframe
+              id="tempGrafanaFrame"
+              class="grafana-frame"
+              src="about:blank"
+              loading="lazy"
+              referrerpolicy="no-referrer"
+            ></iframe>
+
             </div>
           </div>
 

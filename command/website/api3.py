@@ -244,54 +244,91 @@ from(bucket: "{INFLUX_BUCKET}")
 # ---------------- WebSocket ECG bridge ----------------
 # The browser decodes the ECG bundle. This endpoint just forwards MQTT bytes.
 @app.websocket("/ws/ecg")
-async def ws_ecg(ws: WebSocket, team: str = Query(...), ff: str = Query(...)):
-    if mqtt is None:
-        await ws.accept()
-        await ws.send_text("ERROR: paho-mqtt not installed in api container")
-        await ws.close()
-        return
-
+async def ws_ecg(ws: WebSocket):
+    """Stream raw ECG bytes from MQTT topic raw/ECG/<team>/<ff> over WebSocket."""
+    # NOTE: accept exactly once
     await ws.accept()
 
+    team = ws.query_params.get("team")
+    ff = ws.query_params.get("ff")
+
+    if not team or not ff:
+        await ws.send_text("ERROR: missing team or ff query params")
+        await ws.close(code=1008)
+        return
+
+    if mqtt is None:
+        await ws.send_text("ERROR: paho-mqtt not installed in api container")
+        await ws.close(code=1011)
+        return
+
+    import asyncio
+    import threading
+
     topic = f"raw/ECG/{team}/{ff}"
-    q: "queue.Queue[bytes]" = __import__("queue").Queue(maxsize=50)
 
-    def on_connect(client, userdata, flags, rc):
-        if rc == 0:
-            client.subscribe(topic, qos=0)
+    # Small async queue to avoid memory blowups if UI is slow
+    q: asyncio.Queue[bytes] = asyncio.Queue(maxsize=64)
+    stop = threading.Event()
 
-    def on_message(client, userdata, msg):
+    def mqtt_worker():
         try:
-            if q.full():
-                # drop oldest
+            client = mqtt.Client()
+            def on_connect(c, u, flags, rc, properties=None):
                 try:
-                    q.get_nowait()
+                    c.subscribe(topic, qos=0)
                 except Exception:
                     pass
-            q.put_nowait(bytes(msg.payload))
-        except Exception:
-            pass
 
-    client = mqtt.Client()
-    client.on_connect = on_connect
-    client.on_message = on_message
-    client.connect(MQTT_HOST, MQTT_PORT, keepalive=30)
-    client.loop_start()
+            def on_message(c, u, msg):
+                if stop.is_set():
+                    return
+                payload = msg.payload or b""
+                try:
+                    # drop if queue full
+                    q.put_nowait(payload)
+                except Exception:
+                    pass
+
+            client.on_connect = on_connect
+            client.on_message = on_message
+
+            # Prefer env vars if present; fallback to localhost
+            host = os.environ.get("MQTT_HOST", "localhost")
+            port = int(os.environ.get("MQTT_PORT", "1883"))
+            client.connect(host, port, keepalive=30)
+            client.loop_start()
+
+            # wait until stop
+            stop.wait()
+
+            try:
+                client.loop_stop()
+            except Exception:
+                pass
+            try:
+                client.disconnect()
+            except Exception:
+                pass
+        except Exception:
+            # If MQTT fails, we just stop producing; WS side will idle
+            return
+
+    t = threading.Thread(target=mqtt_worker, daemon=True)
+    t.start()
 
     try:
         while True:
-            try:
-                payload = q.get(timeout=5.0)
-            except Exception:
-                # keepalive ping
-                await ws.send_bytes(b"")
-                continue
+            payload = await q.get()
+            # Send raw bytes exactly as received
             await ws.send_bytes(payload)
     except WebSocketDisconnect:
         pass
-    finally:
+    except Exception:
+        # Don't crash the server on unexpected WS errors
         try:
-            client.loop_stop()
-            client.disconnect()
+            await ws.close(code=1011)
         except Exception:
             pass
+    finally:
+        stop.set()

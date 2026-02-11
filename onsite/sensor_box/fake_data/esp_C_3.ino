@@ -57,9 +57,7 @@ static const uint32_t DEMO_CYCLE_MS =
 // =========================================================
 // ECG PLAYBACK + BPM/RR FROM SEGMENT
 // =========================================================
-// IMPORTANT: set this to the true sampling rate of your segment.
-// Common: 250 or 360. If wrong => BPM/RR wrong.
-static const uint16_t ECG_FS_HZ = 360;
+static const uint16_t ECG_FS_HZ = 125;
 
 // How many samples per MQTT payload
 static const uint16_t ECG_SAMPLES_PER_BUNDLE = 20;

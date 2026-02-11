@@ -85,12 +85,25 @@ from(bucket: "{INFLUX_BUCKET}")
   )
   |> filter(fn: (r) =>
       r["_field"] == "hrBpm" or
+      r["_field"] == "rrMs" or
       r["_field"] == "tempC" or
+      r["_field"] == "humidityPct" or
       r["_field"] == "mq2Raw" or
+      r["_field"] == "coPpm" or
       r["_field"] == "stressIndex" or
+      r["_field"] == "fatigueIndex" or
+      r["_field"] == "riskScore" or
+      r["_field"] == "heatRisk" or
+      r["_field"] == "gasRisk" or
+      r["_field"] == "heatIndexC" or
+      r["_field"] == "rmssdMs" or
+      r["_field"] == "sdnnMs" or
+      r["_field"] == "pnn50Pct" or
+      r["_field"] == "separationRisk" or
       r["_field"] == "lat" or
       r["_field"] == "lon"
   )
+
   |> keep(columns: ["_time","_measurement","_field","_value","ffId","teamId"])
   |> sort(columns: ["_time"], desc: false)
 '''
@@ -118,7 +131,18 @@ from(bucket: "{INFLUX_BUCKET}")
             if fval is None:
                 continue
 
-            if field in ("hrBpm", "tempC", "mq2Raw", "stressIndex", "lat", "lon"):
+            ALLOWED = {
+                "hrBpm", "rrMs",
+                "tempC", "humidityPct",
+                "mq2Raw", "coPpm",
+                "stressIndex", "fatigueIndex", "riskScore",
+                "heatRisk", "gasRisk", "heatIndexC",
+                "rmssdMs", "sdnnMs", "pnn50Pct",
+                "separationRisk",
+                "lat", "lon",
+            }
+
+            if field in ALLOWED:
                 m[field] = fval
 
     return {"team": team, "members": list(members.values())}

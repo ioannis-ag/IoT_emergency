@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import time
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, Optional, List
+from typing import Any, Dict, Optional, List, Tuple
 
 import requests
 from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
@@ -27,7 +28,7 @@ INFLUX_BUCKET = os.getenv("INFLUX_BUCKET", "")
 ORION_BASE = os.getenv("ORION_BASE", "http://192.168.2.12:1026")
 WEATHER_ENTITY_ID = os.getenv("WEATHER_ENTITY_ID", "Weather:Patra")
 
-# MQTT for raw ECG (command-center side)
+# MQTT
 MQTT_HOST = os.getenv("MQTT_HOST", "192.168.2.12")
 MQTT_PORT = int(os.getenv("MQTT_PORT", "1883"))
 
@@ -37,6 +38,9 @@ MEAS_BIO = os.getenv("MEAS_BIO", "Biomedical")
 MEAS_LOC = os.getenv("MEAS_LOC", "Location")
 MEAS_ALERTS = os.getenv("MEAS_ALERTS", "Alerts")
 MEAS_WEATHER = os.getenv("MEAS_WEATHER", "WeatherObserved")
+
+# Location cache behavior
+LOC_CACHE_TTL_SEC = int(os.getenv("LOC_CACHE_TTL_SEC", "3600"))  # keep last known for 1h by default
 
 
 def _now_utc() -> datetime:
@@ -66,6 +70,160 @@ def _influx_client() -> InfluxDBClient:
     return InfluxDBClient(url=INFLUX_URL, token=INFLUX_TOKEN, org=INFLUX_ORG)
 
 
+# -----------------------------------------------------------------------------
+# LIVE MQTT LOCATION CACHE
+# -----------------------------------------------------------------------------
+# Keyed by (teamId, ffId) -> {"lat": float, "lon": float, "observedAt": str, "ts": float}
+_location_cache: Dict[Tuple[str, str], Dict[str, Any]] = {}
+_location_lock = asyncio.Lock()
+
+_mqtt_loc_client = None
+_mqtt_loc_loop = None
+
+
+def _parse_team_ff_from_topic(topic: str) -> Tuple[Optional[str], Optional[str]]:
+    # expected: ngsi/Location/<team>/<ff>
+    try:
+        parts = [p for p in (topic or "").split("/") if p]
+        if len(parts) >= 4 and parts[0] == "ngsi" and parts[1] == "Location":
+            return parts[2], parts[3]
+    except Exception:
+        pass
+    return None, None
+
+
+def _payload_to_latlon(payload: bytes) -> Tuple[Optional[float], Optional[float], Optional[str]]:
+    """
+    Supports your OwnTracks-like payload:
+      {"lat": 38.254727, "lon": 21.742054, "tst": 1770842887, ...}
+    Also supports:
+      {"observedAt":"...Z"} etc.
+    """
+    try:
+        d = json.loads(payload.decode("utf-8", "replace"))
+    except Exception:
+        return None, None, None
+
+    lat = _safe_float(d.get("lat"))
+    lon = _safe_float(d.get("lon") if "lon" in d else d.get("lng"))
+
+    obs = None
+    if isinstance(d.get("observedAt"), str) and d.get("observedAt"):
+        obs = d["observedAt"]
+    elif isinstance(d.get("timestamp"), str) and d.get("timestamp"):
+        obs = d["timestamp"]
+    elif isinstance(d.get("tst"), (int, float)):
+        # OwnTracks 'tst' is epoch seconds
+        try:
+            obs = _iso(datetime.fromtimestamp(float(d["tst"]), tz=timezone.utc))
+        except Exception:
+            obs = None
+
+    return lat, lon, obs
+
+
+def _cache_set(team: str, ff: str, lat: float, lon: float, observed_at: Optional[str]) -> None:
+    # Called from MQTT thread via loop.call_soon_threadsafe, so do not use await here.
+    key = (team, ff)
+    _location_cache[key] = {
+        "teamId": team,
+        "ffId": ff,
+        "lat": float(lat),
+        "lon": float(lon),
+        "observedAt": observed_at or _iso(_now_utc()),
+        "ts": time.time(),
+        "source": "mqtt",
+    }
+
+
+def _cache_prune(now_ts: Optional[float] = None) -> None:
+    now_ts = now_ts or time.time()
+    ttl = max(10, LOC_CACHE_TTL_SEC)
+    dead = [k for k, v in _location_cache.items() if (now_ts - float(v.get("ts", 0))) > ttl]
+    for k in dead:
+        _location_cache.pop(k, None)
+
+
+def _start_mqtt_location_cache():
+    """
+    Starts a background MQTT client (threaded via paho loop_start)
+    that subscribes to ngsi/Location/+/+ and keeps last lat/lon per FF.
+    """
+    global _mqtt_loc_client, _mqtt_loc_loop
+    if mqtt is None:
+        return
+    if _mqtt_loc_client is not None:
+        return
+
+    _mqtt_loc_loop = asyncio.get_event_loop()
+
+    client = mqtt.Client()
+
+    def on_connect(c, userdata, flags, rc):
+        if rc == 0:
+            c.subscribe("ngsi/Location/+/+", qos=0)
+
+    def on_message(c, userdata, msg):
+        topic = msg.topic or ""
+        team, ff = _parse_team_ff_from_topic(topic)
+        if not team or not ff:
+            return
+
+        lat, lon, obs = _payload_to_latlon(bytes(msg.payload))
+        if lat is None or lon is None:
+            return
+
+        def _apply():
+            try:
+                _cache_prune()
+                _cache_set(team, ff, lat, lon, obs)
+            except Exception:
+                pass
+
+        # marshal into the FastAPI loop safely
+        try:
+            _mqtt_loc_loop.call_soon_threadsafe(_apply)
+        except Exception:
+            # if loop isn't available, still store (best effort)
+            try:
+                _cache_prune()
+                _cache_set(team, ff, lat, lon, obs)
+            except Exception:
+                pass
+
+    client.on_connect = on_connect
+    client.on_message = on_message
+    client.connect(MQTT_HOST, MQTT_PORT, keepalive=30)
+    client.loop_start()
+
+    _mqtt_loc_client = client
+
+
+@app.on_event("startup")
+async def _on_startup():
+    # Start MQTT location cache so /api/latest can always provide last-known coords.
+    try:
+        _start_mqtt_location_cache()
+    except Exception:
+        # don't fail startup if mqtt isn't reachable
+        pass
+
+
+@app.on_event("shutdown")
+async def _on_shutdown():
+    global _mqtt_loc_client
+    try:
+        if _mqtt_loc_client is not None:
+            _mqtt_loc_client.loop_stop()
+            _mqtt_loc_client.disconnect()
+    except Exception:
+        pass
+    _mqtt_loc_client = None
+
+
+# -----------------------------------------------------------------------------
+# API
+# -----------------------------------------------------------------------------
 @app.get("/api/health")
 def health():
     return {"ok": True, "ts": _iso(_now_utc())}
@@ -77,8 +235,13 @@ def latest(team: str = Query(...), minutes: int = Query(60, ge=1, le=240)):
     Returns:
       { team: "Team_A", members: [ {teamId, ffId, hrBpm, tempC, mq2Raw, lat, lon, ...}, ... ] }
 
-    Expects Influx points tagged with: teamId, ffId
-    across measurements Environment/Biomedical/Location.
+    Primary source: Influx points tagged with teamId, ffId across
+      Environment / Biomedical / Location.
+
+    IMPORTANT FIX:
+      If Influx doesn't have lat/lon for some FF (e.g., FF_A),
+      we merge last-known coords from MQTT topic cache:
+        ngsi/Location/<team>/<ff>
     """
     _need_influx()
 
@@ -116,7 +279,6 @@ from(bucket: "{INFLUX_BUCKET}")
             q = client.query_api()
             tables = q.query(flux, org=INFLUX_ORG)
     except Exception as e:
-        # Make failures obvious but not "hang"
         raise HTTPException(502, f"Influx query failed: {type(e).__name__}: {str(e)[:200]}")
 
     for table in tables:
@@ -137,11 +299,31 @@ from(bucket: "{INFLUX_BUCKET}")
                 continue
             m[field] = fval
 
+    # ---- Merge MQTT cached locations (fixes FF_A missing lat/lon) ----
+    try:
+        _cache_prune()
+        for (t, ff), v in list(_location_cache.items()):
+            if t != team:
+                continue
+
+            m = members.setdefault(ff, {"teamId": team, "ffId": ff})
+
+            # Only set lat/lon if missing or invalid in Influx result
+            lat_ok = isinstance(m.get("lat"), (int, float)) and float(m.get("lat")) != 0.0
+            lon_ok = isinstance(m.get("lon"), (int, float)) and float(m.get("lon")) != 0.0
+
+            if not lat_ok or not lon_ok:
+                m["lat"] = float(v.get("lat"))
+                m["lon"] = float(v.get("lon"))
+                m["locObservedAt"] = v.get("observedAt") or _iso(_now_utc())
+                m["locSource"] = "mqtt"
+    except Exception:
+        pass
+
     return {"team": team, "members": list(members.values())}
 
 
 def _weather_risk_from_wind(wind_ms: Optional[float]) -> str:
-    # simple, conservative UI badge
     if wind_ms is None:
         return "LOW"
     if wind_ms >= 12:
@@ -156,9 +338,6 @@ def weather(lat: float = Query(...), lon: float = Query(...)):
     """
     Prefer ORION (because your agent updates Orion reliably).
     If ORION fails, optionally try Influx WeatherObserved.
-
-    Output:
-      { ok, source, tempC, windMs, humidityPct?, windDirDeg?, risk, observedAt }
     """
     # 1) ORION (primary)
     try:
@@ -172,14 +351,10 @@ def weather(lat: float = Query(...), lon: float = Query(...)):
             temp_c = _safe_float(d.get("temperature"))
             wind_ms = _safe_float(d.get("windSpeed"))
             wind_dir = _safe_float(d.get("windDirection"))
-            hum = _safe_float(d.get("humidity"))  # not always present
+            hum = _safe_float(d.get("humidity"))
             obs = d.get("timestamp") or d.get("observedAt")
 
-            out = {
-                "ok": True,
-                "source": "orion",
-                "risk": _weather_risk_from_wind(wind_ms),
-            }
+            out = {"ok": True, "source": "orion", "risk": _weather_risk_from_wind(wind_ms)}
             if temp_c is not None:
                 out["tempC"] = temp_c
             if wind_ms is not None:
@@ -259,7 +434,7 @@ def weather(lat: float = Query(...), lon: float = Query(...)):
 @app.post("/api/action")
 def action(payload: Dict[str, Any]):
     """
-    Stores a command action to Orion (so it can be logged / bridged / displayed).
+    Stores a command action to Orion.
     payload: {teamId, ffId?, action, note?}
     """
     team = payload.get("teamId")
@@ -297,6 +472,64 @@ def action(payload: Dict[str, Any]):
     return {"ok": True, "id": eid}
 
 
+@app.get("/api/actions")
+def actions(
+    team: str = Query(...),
+    minutes: int = Query(180, ge=1, le=1440),
+    limit: int = Query(200, ge=1, le=2000),
+):
+    """
+    Pull recent CommandAction entities from Orion (so actions are visible to any frontend).
+    Returns:
+      { team, actions: [ {id, teamId, ffId, action, note, observedAt, timestamp} ... ] }
+    """
+    since_ts = int(time.time()) - int(minutes * 60)
+
+    # Orion v2 supports filtering by type and q (simple comparisons).
+    # We store timestamp (Number) so we can filter on it.
+    try:
+        r = requests.get(
+            f"{ORION_BASE}/v2/entities",
+            params={
+                "type": "CommandAction",
+                "options": "keyValues",
+                "limit": str(min(limit, 1000)),
+                "q": f"teamId=={team};timestamp>{since_ts}",
+            },
+            timeout=5,
+        )
+    except Exception as e:
+        raise HTTPException(502, f"Orion unreachable: {e}")
+
+    if r.status_code != 200:
+        raise HTTPException(502, f"Orion error: {r.status_code} {r.text[:200]}")
+
+    arr = r.json() or []
+    out: List[Dict[str, Any]] = []
+    for e in arr:
+        try:
+            if e.get("teamId") != team:
+                continue
+            out.append(
+                {
+                    "id": e.get("id"),
+                    "teamId": e.get("teamId"),
+                    "ffId": e.get("ffId", "ALL"),
+                    "action": e.get("action"),
+                    "note": e.get("note", ""),
+                    "observedAt": e.get("observedAt"),
+                    "timestamp": e.get("timestamp"),
+                }
+            )
+        except Exception:
+            pass
+
+    # sort newest first
+    out.sort(key=lambda x: int(x.get("timestamp") or 0), reverse=True)
+    out = out[:limit]
+    return {"team": team, "actions": out}
+
+
 @app.get("/api/alerts")
 def alerts(
     team: str = Query(...),
@@ -305,7 +538,7 @@ def alerts(
 ):
     """
     Returns alerts from Influx (if you persist them).
-    Expected tags: teamId, ffId. Expected fields: severity,title,detail (or similar).
+    Expected tags: teamId, ffId.
     """
     _need_influx()
     since = _now_utc() - timedelta(minutes=minutes)
@@ -358,8 +591,9 @@ from(bucket: "{INFLUX_BUCKET}")
     return {"team": team, "alerts": rows}
 
 
-# ---------------- WebSocket ECG bridge ----------------
-# IMPORTANT: must NOT block the async event loop.
+# -----------------------------------------------------------------------------
+# WebSocket ECG bridge
+# -----------------------------------------------------------------------------
 @app.websocket("/ws/ecg")
 async def ws_ecg(ws: WebSocket, team: str = Query(...), ff: str = Query(...)):
     if mqtt is None:

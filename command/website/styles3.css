@@ -518,3 +518,45 @@ label.pill select{
   color:var(--text);
   outline:none;
 }
+
+/* ===== Team tab: big status box (grab attention) ===== */
+.ff-status-big{
+  border: 2px solid var(--border);
+  border-radius: 18px;
+  padding: 16px 16px;
+}
+
+/* Apply severity class from JS */
+.ff-status-big.ok{
+  border-color: rgba(22,163,74,.35);
+  background: linear-gradient(180deg, rgba(22,163,74,.10), rgba(255,255,255,.95));
+}
+.ff-status-big.warn{
+  border-color: rgba(245,158,11,.45);
+  background: linear-gradient(180deg, rgba(245,158,11,.14), rgba(255,255,255,.95));
+}
+.ff-status-big.danger{
+  border-color: rgba(239,68,68,.55);
+  background: linear-gradient(180deg, rgba(239,68,68,.16), rgba(255,255,255,.95));
+  box-shadow: 0 14px 34px rgba(239,68,68,.16);
+}
+
+.ff-status-title{
+  font-size: 20px;        /* larger */
+  font-weight: 1300;
+  letter-spacing: .2px;
+}
+
+.ff-status-desc{
+  margin-top: 10px;
+  font-size: 15px;        /* larger */
+  font-weight: 1100;
+  line-height: 1.45;
+}
+
+/* Make wording itself colored (extra attention) */
+.ff-status-big.warn .ff-status-title,
+.ff-status-big.warn .ff-status-desc{ color: #92400e; }
+
+.ff-status-big.danger .ff-status-title,
+.ff-status-big.danger .ff-status-desc{ color: #991b1b; }

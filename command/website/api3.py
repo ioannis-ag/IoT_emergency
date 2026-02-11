@@ -1,9 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import os
 import time
-import base64
-import threading
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Optional, List
 
@@ -24,8 +23,9 @@ INFLUX_TOKEN = os.getenv("INFLUX_TOKEN", "")
 INFLUX_ORG = os.getenv("INFLUX_ORG", "")
 INFLUX_BUCKET = os.getenv("INFLUX_BUCKET", "")
 
-WEATHER_AGENT_URL = os.getenv("WEATHER_AGENT_URL", "http://weather-agent:8000")
-ORION_BASE = os.getenv("ORION_BASE", "http://orion:1026")
+# Orion inside Docker doesn't resolve in your setup; default to host IP that works for you.
+ORION_BASE = os.getenv("ORION_BASE", "http://192.168.2.12:1026")
+WEATHER_ENTITY_ID = os.getenv("WEATHER_ENTITY_ID", "Weather:Patra")
 
 # MQTT for raw ECG (command-center side)
 MQTT_HOST = os.getenv("MQTT_HOST", "192.168.2.12")
@@ -36,12 +36,16 @@ MEAS_ENV = os.getenv("MEAS_ENV", "Environment")
 MEAS_BIO = os.getenv("MEAS_BIO", "Biomedical")
 MEAS_LOC = os.getenv("MEAS_LOC", "Location")
 MEAS_ALERTS = os.getenv("MEAS_ALERTS", "Alerts")
+MEAS_WEATHER = os.getenv("MEAS_WEATHER", "WeatherObserved")
+
 
 def _now_utc() -> datetime:
     return datetime.now(timezone.utc)
 
+
 def _iso(dt: datetime) -> str:
     return dt.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
 
 def _safe_float(x) -> Optional[float]:
     try:
@@ -51,23 +55,27 @@ def _safe_float(x) -> Optional[float]:
     except Exception:
         return None
 
+
 def _need_influx():
     if not (INFLUX_TOKEN and INFLUX_ORG and INFLUX_BUCKET):
         raise HTTPException(500, "Missing INFLUX_TOKEN/INFLUX_ORG/INFLUX_BUCKET in environment")
+
 
 def _influx_client() -> InfluxDBClient:
     _need_influx()
     return InfluxDBClient(url=INFLUX_URL, token=INFLUX_TOKEN, org=INFLUX_ORG)
 
+
 @app.get("/api/health")
 def health():
     return {"ok": True, "ts": _iso(_now_utc())}
+
 
 @app.get("/api/latest")
 def latest(team: str = Query(...), minutes: int = Query(60, ge=1, le=240)):
     """
     Returns:
-      { team: "Team_A", members: [ {teamId, ffId, hrBpm, tempC, mq2Raw, lat, lon, stressIndex, ...}, ... ] }
+      { team: "Team_A", members: [ {teamId, ffId, hrBpm, tempC, mq2Raw, lat, lon, ...}, ... ] }
 
     Expects Influx points tagged with: teamId, ffId
     across measurements Environment/Biomedical/Location.
@@ -77,7 +85,6 @@ def latest(team: str = Query(...), minutes: int = Query(60, ge=1, le=240)):
     since = _now_utc() - timedelta(minutes=minutes)
     start = since.isoformat()
 
-    # include extra fields (risk + env + hrv)
     wanted_fields = [
         "hrBpm", "rrMs",
         "tempC", "humidityPct", "mq2Raw", "mq2Digital", "coPpm",
@@ -86,7 +93,6 @@ def latest(team: str = Query(...), minutes: int = Query(60, ge=1, le=240)):
         "rmssdMs", "sdnnMs", "pnn50Pct",
         "lat", "lon",
     ]
-
     field_filter = " or ".join([f'r["_field"] == "{f}"' for f in wanted_fields])
 
     flux = f'''
@@ -105,9 +111,13 @@ from(bucket: "{INFLUX_BUCKET}")
 
     members: Dict[str, Dict[str, Any]] = {}
 
-    with _influx_client() as client:
-        q = client.query_api()
-        tables = q.query(flux, org=INFLUX_ORG)
+    try:
+        with _influx_client() as client:
+            q = client.query_api()
+            tables = q.query(flux, org=INFLUX_ORG)
+    except Exception as e:
+        # Make failures obvious but not "hang"
+        raise HTTPException(502, f"Influx query failed: {type(e).__name__}: {str(e)[:200]}")
 
     for table in tables:
         for rec in table.records:
@@ -125,23 +135,126 @@ from(bucket: "{INFLUX_BUCKET}")
             fval = _safe_float(val)
             if fval is None:
                 continue
-
             m[field] = fval
 
     return {"team": team, "members": list(members.values())}
 
+
+def _weather_risk_from_wind(wind_ms: Optional[float]) -> str:
+    # simple, conservative UI badge
+    if wind_ms is None:
+        return "LOW"
+    if wind_ms >= 12:
+        return "HIGH"
+    if wind_ms >= 7:
+        return "MEDIUM"
+    return "LOW"
+
+
 @app.get("/api/weather")
 def weather(lat: float = Query(...), lon: float = Query(...)):
-    """Proxies weather-agent: GET /weather?lat=..&lon=.."""
+    """
+    Prefer ORION (because your agent updates Orion reliably).
+    If ORION fails, optionally try Influx WeatherObserved.
+
+    Output:
+      { ok, source, tempC, windMs, humidityPct?, windDirDeg?, risk, observedAt }
+    """
+    # 1) ORION (primary)
     try:
-        r = requests.get(f"{WEATHER_AGENT_URL}/weather", params={"lat": lat, "lon": lon}, timeout=8)
+        r = requests.get(
+            f"{ORION_BASE}/v2/entities/{WEATHER_ENTITY_ID}",
+            params={"options": "keyValues"},
+            timeout=3,
+        )
+        if r.status_code == 200:
+            d = r.json() or {}
+            temp_c = _safe_float(d.get("temperature"))
+            wind_ms = _safe_float(d.get("windSpeed"))
+            wind_dir = _safe_float(d.get("windDirection"))
+            hum = _safe_float(d.get("humidity"))  # not always present
+            obs = d.get("timestamp") or d.get("observedAt")
+
+            out = {
+                "ok": True,
+                "source": "orion",
+                "risk": _weather_risk_from_wind(wind_ms),
+            }
+            if temp_c is not None:
+                out["tempC"] = temp_c
+            if wind_ms is not None:
+                out["windMs"] = wind_ms
+            if wind_dir is not None:
+                out["windDirDeg"] = wind_dir
+            if hum is not None:
+                out["humidityPct"] = hum
+            if isinstance(obs, str) and obs:
+                out["observedAt"] = obs
+            return out
+    except Exception:
+        pass
+
+    # 2) Influx fallback (best-effort)
+    if not (INFLUX_TOKEN and INFLUX_ORG and INFLUX_BUCKET):
+        return {"ok": False, "reason": "Weather fetch failed: Orion unreachable + missing Influx env", "risk": "LOW"}
+
+    flux = f"""from(bucket: "{INFLUX_BUCKET}")
+  |> range(start: -6h)
+  |> filter(fn: (r) => r["_measurement"] == "{MEAS_WEATHER}")
+  |> filter(fn: (r) =>
+      r["_field"] == "temperature" or
+      r["_field"] == "windSpeed" or
+      r["_field"] == "windDirection" or
+      r["_field"] == "humidityPct" or
+      r["_field"] == "humidity"
+  )
+  |> last()
+  |> pivot(rowKey: ["_time"], columnKey: ["_field"], valueColumn: "_value")
+  |> sort(columns: ["_time"], desc: true)
+  |> limit(n: 1)
+"""
+    try:
+        with InfluxDBClient(url=INFLUX_URL, token=INFLUX_TOKEN, org=INFLUX_ORG) as client:
+            tables = client.query_api().query(flux, org=INFLUX_ORG)
     except Exception as e:
-        raise HTTPException(502, f"Weather agent unreachable: {e}")
+        return {"ok": False, "reason": f"Weather fetch failed: {type(e).__name__}", "risk": "LOW"}
 
-    if r.status_code != 200:
-        raise HTTPException(502, f"Weather agent error: {r.status_code} {r.text}")
+    row = None
+    for t in tables:
+        for rec in t.records:
+            row = rec.values
+            break
+        if row:
+            break
 
-    return r.json()
+    if not row:
+        return {"ok": False, "reason": "No weather data (Orion failed, Influx empty)", "risk": "LOW"}
+
+    temp_c = _safe_float(row.get("temperature"))
+    wind_ms = _safe_float(row.get("windSpeed"))
+    wind_dir = _safe_float(row.get("windDirection"))
+    hum = _safe_float(row.get("humidityPct"))
+    if hum is None:
+        hum = _safe_float(row.get("humidity"))
+
+    observed_at = None
+    t = row.get("_time")
+    if isinstance(t, datetime):
+        observed_at = _iso(t)
+
+    out = {"ok": True, "source": "influx", "risk": _weather_risk_from_wind(wind_ms)}
+    if temp_c is not None:
+        out["tempC"] = temp_c
+    if wind_ms is not None:
+        out["windMs"] = wind_ms
+    if wind_dir is not None:
+        out["windDirDeg"] = wind_dir
+    if hum is not None:
+        out["humidityPct"] = hum
+    if observed_at:
+        out["observedAt"] = observed_at
+    return out
+
 
 @app.post("/api/action")
 def action(payload: Dict[str, Any]):
@@ -183,12 +296,16 @@ def action(payload: Dict[str, Any]):
 
     return {"ok": True, "id": eid}
 
+
 @app.get("/api/alerts")
-def alerts(team: str = Query(...), minutes: int = Query(180, ge=1, le=1440), limit: int = Query(200, ge=1, le=2000)):
+def alerts(
+    team: str = Query(...),
+    minutes: int = Query(180, ge=1, le=1440),
+    limit: int = Query(200, ge=1, le=2000),
+):
     """
     Returns alerts from Influx (if you persist them).
     Expected tags: teamId, ffId. Expected fields: severity,title,detail (or similar).
-    If you don't have this measurement, you'll get an empty list.
     """
     _need_influx()
     since = _now_utc() - timedelta(minutes=minutes)
@@ -203,14 +320,14 @@ from(bucket: "{INFLUX_BUCKET}")
   |> sort(columns: ["_time"], desc: true)
 '''
 
-    # Build latest alert rows by grouping on time+ffId if your alerts are written that way.
-    # If your structure differs, this still returns best-effort.
-    rows: List[Dict[str, Any]] = []
     acc: Dict[str, Dict[str, Any]] = {}
 
-    with _influx_client() as client:
-        q = client.query_api()
-        tables = q.query(flux, org=INFLUX_ORG)
+    try:
+        with _influx_client() as client:
+            q = client.query_api()
+            tables = q.query(flux, org=INFLUX_ORG)
+    except Exception as e:
+        raise HTTPException(502, f"Influx query failed: {type(e).__name__}: {str(e)[:200]}")
 
     for table in tables:
         for rec in table.records:
@@ -220,6 +337,7 @@ from(bucket: "{INFLUX_BUCKET}")
                 continue
             k = f"{ff}|{t.isoformat()}"
             row = acc.setdefault(k, {"teamId": team, "ffId": ff, "observedAt": _iso(t)})
+
             field = rec.get_field()
             val = rec.get_value()
             if isinstance(val, (int, float)):
@@ -227,12 +345,10 @@ from(bucket: "{INFLUX_BUCKET}")
             else:
                 row[field] = str(val)
 
-    # take most recent first
-    rows = list(acc.values())
-    rows.sort(key=lambda r: r.get("observedAt",""), reverse=True)
+    rows: List[Dict[str, Any]] = list(acc.values())
+    rows.sort(key=lambda r: r.get("observedAt", ""), reverse=True)
     rows = rows[:limit]
 
-    # normalize keys if present
     for r in rows:
         if "severity" not in r and "worst" in r:
             r["severity"] = r.get("worst")
@@ -241,94 +357,66 @@ from(bucket: "{INFLUX_BUCKET}")
 
     return {"team": team, "alerts": rows}
 
+
 # ---------------- WebSocket ECG bridge ----------------
-# The browser decodes the ECG bundle. This endpoint just forwards MQTT bytes.
+# IMPORTANT: must NOT block the async event loop.
 @app.websocket("/ws/ecg")
-async def ws_ecg(ws: WebSocket):
-    """Stream raw ECG bytes from MQTT topic raw/ECG/<team>/<ff> over WebSocket."""
-    # NOTE: accept exactly once
+async def ws_ecg(ws: WebSocket, team: str = Query(...), ff: str = Query(...)):
+    if mqtt is None:
+        await ws.accept()
+        await ws.send_text("ERROR: paho-mqtt not installed in api container")
+        await ws.close()
+        return
+
     await ws.accept()
 
-    team = ws.query_params.get("team")
-    ff = ws.query_params.get("ff")
-
-    if not team or not ff:
-        await ws.send_text("ERROR: missing team or ff query params")
-        await ws.close(code=1008)
-        return
-
-    if mqtt is None:
-        await ws.send_text("ERROR: paho-mqtt not installed in api container")
-        await ws.close(code=1011)
-        return
-
-    import asyncio
-    import threading
-
     topic = f"raw/ECG/{team}/{ff}"
+    loop = asyncio.get_running_loop()
+    aq: asyncio.Queue[bytes] = asyncio.Queue(maxsize=50)
 
-    # Small async queue to avoid memory blowups if UI is slow
-    q: asyncio.Queue[bytes] = asyncio.Queue(maxsize=64)
-    stop = threading.Event()
+    def on_connect(client, userdata, flags, rc):
+        if rc == 0:
+            client.subscribe(topic, qos=0)
 
-    def mqtt_worker():
-        try:
-            client = mqtt.Client()
-            def on_connect(c, u, flags, rc, properties=None):
-                try:
-                    c.subscribe(topic, qos=0)
-                except Exception:
-                    pass
+    def on_message(client, userdata, msg):
+        payload = bytes(msg.payload)
 
-            def on_message(c, u, msg):
-                if stop.is_set():
-                    return
-                payload = msg.payload or b""
-                try:
-                    # drop if queue full
-                    q.put_nowait(payload)
-                except Exception:
-                    pass
-
-            client.on_connect = on_connect
-            client.on_message = on_message
-
-            # Prefer env vars if present; fallback to localhost
-            host = os.environ.get("MQTT_HOST", "localhost")
-            port = int(os.environ.get("MQTT_PORT", "1883"))
-            client.connect(host, port, keepalive=30)
-            client.loop_start()
-
-            # wait until stop
-            stop.wait()
-
+        def _put():
             try:
-                client.loop_stop()
+                if aq.full():
+                    try:
+                        aq.get_nowait()
+                    except Exception:
+                        pass
+                aq.put_nowait(payload)
             except Exception:
                 pass
-            try:
-                client.disconnect()
-            except Exception:
-                pass
-        except Exception:
-            # If MQTT fails, we just stop producing; WS side will idle
-            return
 
-    t = threading.Thread(target=mqtt_worker, daemon=True)
-    t.start()
+        loop.call_soon_threadsafe(_put)
+
+    client = mqtt.Client()
+    client.on_connect = on_connect
+    client.on_message = on_message
+    client.connect(MQTT_HOST, MQTT_PORT, keepalive=30)
+    client.loop_start()
 
     try:
         while True:
-            payload = await q.get()
-            # Send raw bytes exactly as received
-            await ws.send_bytes(payload)
+            try:
+                payload = await asyncio.wait_for(aq.get(), timeout=5.0)
+                await ws.send_bytes(payload)
+            except asyncio.TimeoutError:
+                # keepalive tick so proxies don't kill idle WS
+                await ws.send_bytes(b"")
     except WebSocketDisconnect:
         pass
-    except Exception:
-        # Don't crash the server on unexpected WS errors
+    finally:
         try:
-            await ws.close(code=1011)
+            client.loop_stop()
+            client.disconnect()
         except Exception:
             pass
-    finally:
-        stop.set()
+        try:
+            await ws.close()
+        except Exception:
+            pass

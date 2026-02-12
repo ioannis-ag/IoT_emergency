@@ -85,12 +85,30 @@
     </main>
   </div>
 
-  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-  <script src="https://unpkg.com/mqtt/dist/mqtt.min.js"></script>
+  <!-- ✅ ACTION POPUP -->
+  <div id="actionPopup" class="action-popup hidden" role="dialog" aria-modal="true" aria-live="assertive">
+    <div id="actionPopupCard" class="action-popup-card">
+      <div class="action-popup-top">
+        <div id="actionPopupTitle" class="action-popup-title">ALERT</div>
+        <button id="actionPopupX" class="action-popup-x" aria-label="Close">✕</button>
+      </div>
+      <div id="actionPopupMsg" class="action-popup-msg">Message</div>
 
-  <!-- ✅ Needed for start/end/loop segments -->
-  <script src="https://www.youtube.com/iframe_api"></script>
+      <div class="action-popup-actions">
+        <button id="actionPopupAcknowledge" class="action-popup-btn">Acknowledge</button>
+      </div>
+    </div>
+  </div>
 
-  <script src="app.js"></script>
+  <!-- libs -->
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" defer></script>
+  <script src="https://unpkg.com/mqtt/dist/mqtt.min.js" defer></script>
+
+  <!-- IMPORTANT:
+       DO NOT load YouTube iframe API here. app.js will load it once. -->
+  <script src="https://cdn.jsdelivr.net/npm/hls.js@1/dist/hls.min.js" defer></script>
+  <!-- CRITICAL FIX:
+       Use absolute path so it's the same file you tested with fetch("/app.js") -->
+  <script src="/app.js?v=20260212-1" defer></script>
 </body>
 </html>

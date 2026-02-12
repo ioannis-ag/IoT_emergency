@@ -1,12 +1,30 @@
 /* =========================================================
    Command Center Frontend (Always show FF_A..FF_D)
-   - Map markers always render using last-known coords
+
+   ✅ Map
+   - Markers always render using last-known coords
    - Trails: keep last 10 points; append only when coords change enough
-   - Grafana embeds: HR + TEMP (panel 1..4 HR, panel 5..8 TEMP)
-     * IMPORTANT: iframe src only updates when selected FF changes (prevents flicker)
-   - Weather via /api/weather using leader (FF_A) last-known coords
-     * FIX: fallback coords + tolerant field mapping + request timeout
-   - Actions: POST /api/action + OPTIONAL pull from backend /api/actions (if implemented)
+   - FIX: if FF_A has NO lat/lon in /api/latest, we fallback to:
+       1) lastPos from previous runs (localStorage)
+       2) average of other FF coords (B/C/D) this tick (so leader still appears)
+
+   ✅ Incident circle
+   - Small circle near firefighters
+   - IMPORTANT: circle is click-through (interactive:false) so markers remain clickable
+   - Also placed in a dedicated pane behind markers
+
+   ✅ Grafana
+   - HR + TEMP (panel 1..4 HR, panel 5..8 TEMP)
+   - refresh=5s so it actually refreshes
+
+   ✅ Weather
+   - /api/weather uses leader coords; fallback to Patras coords if leader missing
+
+   ✅ Video in Team tab (Operator Metrics)
+   - FF_A: mtxmedia iframe 192.168.2.13:8889/cam
+   - FF_B/C/D: YouTube embed (nocookie) starting at 10s / 70s / 130s
+     * Loops every 60s by reloading iframe with cache-buster
+
    ========================================================= */
 
 const CONFIG = {
@@ -15,18 +33,19 @@ const CONFIG = {
   LATEST_MINUTES: 60,
 
   WEATHER_POLL_MS: 5 * 60 * 1000,
-  // Fallback if leader coords not available yet:
   WEATHER_FALLBACK: { lat: 38.2466, lon: 21.7346, label: "Patras fallback" },
 
   TRAIL_POINTS: 10,
   TRAIL_MIN_METERS: 2,
 
-  // If your backend implements GET /api/actions, this will pull them and merge into local log.
   ACTIONS_POLL_MS: 4000,
   ACTIONS_MINUTES: 180,
 
-  // network timeouts
   FETCH_TIMEOUT_MS: 4500,
+
+  // Incident circle (≈ 3–4 buildings)
+  INCIDENT_RADIUS_M: 30,
+  INCIDENT_FOLLOW: true, // keep it near the team/leader
 };
 
 const GRAFANA = {
@@ -45,16 +64,9 @@ const GRAFANA = {
 const VIDEO = {
   FF_A: { type: "iframe", url: "http://192.168.2.13:8889/cam" },
 
-  // YouTube: B starts at 0:10, C at 1:10, D at 2:10
-  // Each loops a 60s segment: [start, start+60]
   YT_VIDEO_ID: "mphHFk5IXsQ",
   SEG_SECONDS: 60,
-
-  START_BY_FF: {
-    FF_B: 10,
-    FF_C: 70,
-    FF_D: 130,
-  },
+  START_BY_FF: { FF_B: 10, FF_C: 70, FF_D: 130 },
 };
 
 const FF_NAMES = {
@@ -75,7 +87,6 @@ const state = {
   mapCenteredOnce: false,
   lastWeatherAt: 0,
 
-  // Actions/alerts
   actionLog: [],
   alertsCache: [],
   lastActionsPollAt: 0,
@@ -83,21 +94,30 @@ const state = {
   // last known position per FF (persist forever)
   lastPos: { FF_A: null, FF_B: null, FF_C: null, FF_D: null },
 
-  // Grafana anti-flicker state
   grafana: { lastFf: null, lastHrSrc: "", lastTempSrc: "" },
+
+  video: { lastFf: null, lastSrc: "", loopTimer: 0 },
+
+  incident: { lat: null, lon: null, lastSetAt: 0 },
 };
 
 /* ---------------- Helpers ---------------- */
 
 function safeCall(fn, ...args) {
-  try { if (typeof fn === "function") return fn(...args); }
-  catch (e) { console.warn(e); }
+  try {
+    if (typeof fn === "function") return fn(...args);
+  } catch (e) {
+    console.warn(e);
+  }
 }
 
 function escapeHtml(s) {
   return String(s ?? "")
-    .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
 }
 
 function flashToast(msg, ms = 1800) {
@@ -129,8 +149,12 @@ function flashToast(msg, ms = 1800) {
   } catch (_) {}
 }
 
-function isNum(x) { return typeof x === "number" && Number.isFinite(x); }
-function fmt(x, d = 0) { return isNum(x) ? x.toFixed(d) : "—"; }
+function isNum(x) {
+  return typeof x === "number" && Number.isFinite(x);
+}
+function fmt(x, d = 0) {
+  return isNum(x) ? x.toFixed(d) : "—";
+}
 
 function toNum(x) {
   if (x === null || x === undefined) return null;
@@ -142,7 +166,9 @@ function toNum(x) {
   return null;
 }
 
-function normId(x) { return x == null ? null : String(x).trim(); }
+function normId(x) {
+  return x == null ? null : String(x).trim();
+}
 
 function canonicalId(id) {
   const s = normId(id);
@@ -151,6 +177,16 @@ function canonicalId(id) {
   return (parts[parts.length - 1] || s).trim();
 }
 
+/**
+ * Robust coordinate extractor.
+ * Supports:
+ *  - m.lat/m.lon
+ *  - m.lat/m.lng
+ *  - m.location.lat/m.location.lon(lng)
+ *  - m.location.coordinates [lon,lat]
+ *  - m.position.lat/m.position.lon(lng)
+ *  - m.position.coordinates [lon,lat]
+ */
 function extractCoords(m) {
   if (!m) return { lat: null, lon: null };
 
@@ -161,11 +197,16 @@ function extractCoords(m) {
     const L = m.location;
     const lat2 = toNum(L.lat);
     const lon2 = toNum(L.lon ?? L.lng);
-    if (isNum(lat2) && isNum(lon2)) { lat = lat2; lon = lon2; }
-    else if (Array.isArray(L.coordinates) && L.coordinates.length >= 2) {
+    if (isNum(lat2) && isNum(lon2)) {
+      lat = lat2;
+      lon = lon2;
+    } else if (Array.isArray(L.coordinates) && L.coordinates.length >= 2) {
       const lonG = toNum(L.coordinates[0]);
       const latG = toNum(L.coordinates[1]);
-      if (isNum(latG) && isNum(lonG)) { lat = latG; lon = lonG; }
+      if (isNum(latG) && isNum(lonG)) {
+        lat = latG;
+        lon = lonG;
+      }
     }
   }
 
@@ -173,49 +214,26 @@ function extractCoords(m) {
     const P = m.position;
     const lat2 = toNum(P.lat);
     const lon2 = toNum(P.lon ?? P.lng);
-    if (isNum(lat2) && isNum(lon2)) { lat = lat2; lon = lon2; }
-    else if (Array.isArray(P.coordinates) && P.coordinates.length >= 2) {
+    if (isNum(lat2) && isNum(lon2)) {
+      lat = lat2;
+      lon = lon2;
+    } else if (Array.isArray(P.coordinates) && P.coordinates.length >= 2) {
       const lonG = toNum(P.coordinates[0]);
       const latG = toNum(P.coordinates[1]);
-      if (isNum(latG) && isNum(lonG)) { lat = latG; lon = lonG; }
+      if (isNum(latG) && isNum(lonG)) {
+        lat = latG;
+        lon = lonG;
+      }
     }
   }
 
   return { lat, lon };
 }
 
-function clamp01(x) { return Math.max(0, Math.min(1, x)); }
-function levelLabel(x01) {
-  if (x01 == null || Number.isNaN(x01)) return "—";
-  if (x01 < 0.33) return "Low";
-  if (x01 < 0.66) return "Moderate";
-  return "High";
-}
-
-function renderBarRow(metricKey, label, value01) {
-  const v = value01 == null ? null : clamp01(Number(value01));
-  const pct = v == null || Number.isNaN(v) ? 0 : Math.round(v * 100);
-  const lvl = levelLabel(v);
-
-  let sev = "ok";
-  if (v == null || Number.isNaN(v)) sev = "warn";
-  else if (v >= 0.66) sev = "danger";
-  else if (v >= 0.33) sev = "warn";
-
-  const valTxt = v == null || Number.isNaN(v) ? "—" : `${pct}% · ${lvl}`;
-
-  return `
-    <div class="bar-row ${sev}" data-metric="${escapeHtml(metricKey)}">
-      <div class="bar-label">${escapeHtml(label)}</div>
-      <div class="bar-track"><div class="bar-fill" style="width:${pct}%;"></div></div>
-      <div class="bar-val">${escapeHtml(valTxt)}</div>
-    </div>
-  `;
-}
-
 function setConn(ok, text) {
   const dot = document.querySelector("#connectionStatus .dot") || document.querySelector(".dot");
-  const t = document.querySelector("#connectionStatus .conn-text") || document.querySelector(".conn-text");
+  const t =
+    document.querySelector("#connectionStatus .conn-text") || document.querySelector(".conn-text");
   if (dot) dot.classList.toggle("on", !!ok);
   if (t) t.textContent = text;
 }
@@ -231,9 +249,40 @@ function tickClock() {
   const el = document.getElementById("clock");
   if (!el) return;
   el.textContent = new Date().toLocaleString(undefined, {
-    hour: "2-digit", minute: "2-digit", second: "2-digit",
-    day: "2-digit", month: "short", year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    day: "2-digit",
+    month: "short",
+    year: "numeric",
   });
+}
+
+/* ---------------- Persistence (lastPos) ---------------- */
+
+function loadLastPos() {
+  try {
+    const raw = localStorage.getItem("cc_last_pos");
+    if (!raw) return;
+    const obj = JSON.parse(raw);
+    if (obj && typeof obj === "object") {
+      for (const ff of FF_FIXED) {
+        const p = obj[ff];
+        if (p && isNum(p.lat) && isNum(p.lon)) state.lastPos[ff] = { lat: p.lat, lon: p.lon, ts: p.ts || 0 };
+      }
+    }
+  } catch (_) {}
+}
+
+function saveLastPos() {
+  try {
+    const out = {};
+    for (const ff of FF_FIXED) {
+      const p = state.lastPos[ff];
+      if (p && isNum(p.lat) && isNum(p.lon)) out[ff] = { lat: p.lat, lon: p.lon, ts: p.ts || 0 };
+    }
+    localStorage.setItem("cc_last_pos", JSON.stringify(out));
+  } catch (_) {}
 }
 
 /* ---------------- Tabs ---------------- */
@@ -273,6 +322,7 @@ function initTabs() {
       );
 
       updateGrafanaFrames(true);
+      updateTeamVideo(true);
 
       if (state.page === "team") safeCall(updateTeamPage);
       if (state.page === "risk") safeCall(updateRiskPage);
@@ -289,14 +339,16 @@ function computeSeverity(m) {
     (isNum(m.tempC) && m.tempC >= 50) ||
     (isNum(m.mq2Raw) && m.mq2Raw >= 2600) ||
     (isNum(m.stressIndex) && m.stressIndex >= 0.75)
-  ) sev = "warn";
+  )
+    sev = "warn";
 
   if (
     (isNum(m.hrBpm) && m.hrBpm >= 170) ||
     (isNum(m.tempC) && m.tempC >= 60) ||
     (isNum(m.mq2Raw) && m.mq2Raw >= 3200) ||
     (isNum(m.stressIndex) && m.stressIndex >= 0.9)
-  ) sev = "danger";
+  )
+    sev = "danger";
 
   return sev;
 }
@@ -329,6 +381,15 @@ function initMap() {
   if (!el) return;
 
   const map = L.map("mainMap").setView([38.2466, 21.7346], 18);
+
+  // ✅ Pane ordering:
+  // incidentPane behind everything
+  map.createPane("incidentPane");
+  map.getPane("incidentPane").style.zIndex = 350; // tiles=200, overlays~400, markers~600
+
+  // trails/lines normal overlayPane (default zIndex 400)
+  // markers use markerPane (600) automatically
+
   L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
     maxZoom: 20,
     attribution: "© OpenStreetMap",
@@ -338,8 +399,10 @@ function initMap() {
   window._markers = {};
   window._tracks = {};
   window._trackLines = {};
+  window._incidentCircle = null;
 
-  document.getElementById("btnRecenterLeader")
+  document
+    .getElementById("btnRecenterLeader")
     ?.addEventListener("click", () => centerOnLeader(true));
 }
 
@@ -368,12 +431,12 @@ function appendTrailPoint(ffId, lat, lon) {
 function popupHtml(ffId, m, lat, lon) {
   return `
     <div style="min-width:220px">
-      <div style="font-weight:1100">${FF_NAMES[ffId] || ffId}
-        <span style="color:#54657e;font-weight:900">(${ffId})</span>
+      <div style="font-weight:1100">${escapeHtml(FF_NAMES[ffId] || ffId)}
+        <span style="color:#54657e;font-weight:900">(${escapeHtml(ffId)})</span>
       </div>
       <div style="margin-top:6px;color:#54657e;font-size:13px;line-height:1.45">
         📍 ${isNum(lat) ? lat.toFixed(6) : "—"}, ${isNum(lon) ? lon.toFixed(6) : "—"}<br/>
-        🕒 ${m?.observedAt || "—"}<br/>
+        🕒 ${escapeHtml(m?.observedAt || "—")}<br/>
         ❤️ HR: <b>${fmt(m?.hrBpm, 0)}</b><br/>
         🌡️ Temp: <b>${fmt(m?.tempC, 1)}°C</b><br/>
         🫁 Smoke: <b>${fmt(m?.mq2Raw, 0)}</b><br/>
@@ -383,17 +446,50 @@ function popupHtml(ffId, m, lat, lon) {
   `;
 }
 
+/**
+ * ✅ FIX for FF_A missing lat/lon in /api/latest:
+ * If FF_A has no coords and has never had coords, fallback to average of others this tick.
+ */
+function getFallbackLeaderFromOthers() {
+  const pts = [];
+  for (const ff of ["FF_B", "FF_C", "FF_D"]) {
+    const p = state.lastPos[ff];
+    if (p && isNum(p.lat) && isNum(p.lon)) pts.push([p.lat, p.lon]);
+  }
+  if (!pts.length) return null;
+  const lat = pts.reduce((a, b) => a + b[0], 0) / pts.length;
+  const lon = pts.reduce((a, b) => a + b[1], 0) / pts.length;
+  return { lat, lon };
+}
+
+/**
+ * ALWAYS show marker if we have any last-known coordinates.
+ * If current coords missing, use lastPos.
+ * If still missing and ffId is FF_A, use fallback from others (so leader appears).
+ */
 function upsertMarkerAlways(ffId, m) {
   if (!window._map) return;
 
   const c = extractCoords(m);
   const hadFresh = isNum(c.lat) && isNum(c.lon);
 
-  let lat = c.lat, lon = c.lon;
+  let lat = c.lat,
+    lon = c.lon;
 
   if (!hadFresh) {
     const last = state.lastPos[ffId];
-    if (last && isNum(last.lat) && isNum(last.lon)) { lat = last.lat; lon = last.lon; }
+    if (last && isNum(last.lat) && isNum(last.lon)) {
+      lat = last.lat;
+      lon = last.lon;
+    } else if (ffId === "FF_A") {
+      const fb = getFallbackLeaderFromOthers();
+      if (fb) {
+        lat = fb.lat;
+        lon = fb.lon;
+        // store so center/weather/incident can work
+        state.lastPos["FF_A"] = { lat, lon, ts: Date.now() };
+      }
+    }
   } else {
     state.lastPos[ffId] = { lat, lon, ts: Date.now() };
     appendTrailPoint(ffId, lat, lon);
@@ -418,12 +514,19 @@ function upsertMarkerAlways(ffId, m) {
     }).addTo(window._map);
 
     mk.bindPopup(popup);
-    mk.bindTooltip(FF_NAMES[ffId] || ffId, { direction: "top", offset: [0, -10], opacity: 0.9 });
+    mk.bindTooltip(FF_NAMES[ffId] || ffId, {
+      direction: "top",
+      offset: [0, -10],
+      opacity: 0.9,
+    });
+
     store[ffId] = mk;
   } else {
     store[ffId].setLatLng([lat, lon]);
     store[ffId].setStyle({ fillColor: color, color: "#ffffff" });
-    store[ffId].getPopup().setContent(popup);
+    try {
+      store[ffId].getPopup()?.setContent(popup);
+    } catch (_) {}
   }
 }
 
@@ -446,6 +549,59 @@ function centerOnLeader(force = false) {
   }
 }
 
+/* ---------------- Incident circle ---------------- */
+
+function computeIncidentCenter() {
+  // Prefer leader; else average of any available
+  const leader = state.lastPos["FF_A"];
+  if (leader && isNum(leader.lat) && isNum(leader.lon)) return { lat: leader.lat, lon: leader.lon };
+
+  const pts = [];
+  for (const ff of FF_FIXED) {
+    const p = state.lastPos[ff];
+    if (p && isNum(p.lat) && isNum(p.lon)) pts.push([p.lat, p.lon]);
+  }
+  if (!pts.length) return null;
+
+  const lat = pts.reduce((a, b) => a + b[0], 0) / pts.length;
+  const lon = pts.reduce((a, b) => a + b[1], 0) / pts.length;
+  return { lat, lon };
+}
+
+function updateIncidentCircle() {
+  if (!window._map) return;
+
+  const c = computeIncidentCenter();
+  if (!c) return;
+
+  // keep it "near" but not exactly on top (small offset)
+  const lat = c.lat + 0.00012;
+  const lon = c.lon + 0.00010;
+
+  // If not following, only set once
+  if (!CONFIG.INCIDENT_FOLLOW && window._incidentCircle) return;
+
+  if (!window._incidentCircle) {
+    window._incidentCircle = L.circle([lat, lon], {
+      radius: CONFIG.INCIDENT_RADIUS_M,
+      color: "#ef4444",
+      weight: 2,
+      opacity: 0.9,
+      fillColor: "#ef4444",
+      fillOpacity: 0.12,
+
+      // ✅ critical: click-through so firefighters remain clickable
+      interactive: false,
+
+      // ✅ keep it behind markers
+      pane: "incidentPane",
+    }).addTo(window._map);
+  } else {
+    window._incidentCircle.setLatLng([lat, lon]);
+    window._incidentCircle.setRadius(CONFIG.INCIDENT_RADIUS_M);
+  }
+}
+
 /* ---------------- API (with timeout) ---------------- */
 
 async function fetchJson(path, timeoutMs = CONFIG.FETCH_TIMEOUT_MS) {
@@ -461,10 +617,14 @@ async function fetchJson(path, timeoutMs = CONFIG.FETCH_TIMEOUT_MS) {
 }
 
 const apiHealth = () => fetchJson("/api/health");
-const apiLatest = () => fetchJson(`/api/latest?team=${encodeURIComponent(CONFIG.TEAM)}&minutes=${CONFIG.LATEST_MINUTES}`);
-const apiWeather = (lat, lon) => fetchJson(`/api/weather?lat=${encodeURIComponent(lat)}&lon=${encodeURIComponent(lon)}`, 6500);
-const apiAlerts = (minutes = 180) => fetchJson(`/api/alerts?team=${encodeURIComponent(CONFIG.TEAM)}&minutes=${minutes}`);
-const apiActions = (minutes = 180) => fetchJson(`/api/actions?team=${encodeURIComponent(CONFIG.TEAM)}&minutes=${minutes}`);
+const apiLatest = () =>
+  fetchJson(`/api/latest?team=${encodeURIComponent(CONFIG.TEAM)}&minutes=${CONFIG.LATEST_MINUTES}`);
+const apiWeather = (lat, lon) =>
+  fetchJson(`/api/weather?lat=${encodeURIComponent(lat)}&lon=${encodeURIComponent(lon)}`, 6500);
+const apiAlerts = (minutes = 180) =>
+  fetchJson(`/api/alerts?team=${encodeURIComponent(CONFIG.TEAM)}&minutes=${minutes}`);
+const apiActions = (minutes = 180) =>
+  fetchJson(`/api/actions?team=${encodeURIComponent(CONFIG.TEAM)}&minutes=${minutes}`);
 
 async function apiAction(payload) {
   const r = await fetch("/api/action", {
@@ -476,7 +636,8 @@ async function apiAction(payload) {
   return await r.json();
 }
 
-/* persist actions in localStorage for the Alerts tab */
+/* ---------------- Action log (local) ---------------- */
+
 function loadActionLog() {
   try {
     const raw = localStorage.getItem("cc_action_log");
@@ -516,7 +677,9 @@ function addActionsFromServer(actionsArr) {
   if (incoming.length) {
     incoming.sort((x, y) => String(y.observedAt || "").localeCompare(String(x.observedAt || "")));
     state.actionLog = incoming.concat(state.actionLog || []).slice(0, 500);
-    try { localStorage.setItem("cc_action_log", JSON.stringify(state.actionLog)); } catch (_) {}
+    try {
+      localStorage.setItem("cc_action_log", JSON.stringify(state.actionLog));
+    } catch (_) {}
   }
 }
 
@@ -532,11 +695,19 @@ function updateDashboardTiles() {
 }
 
 function updateTeamStatusPanel() {
-  let worst = "ok", worstFf = null;
+  let worst = "ok",
+    worstFf = null;
   for (const [ffId, m] of Object.entries(state.latestByFf)) {
     const s = computeSeverity(m || {});
-    if (s === "danger") { worst = "danger"; worstFf = ffId; break; }
-    if (s === "warn" && worst !== "danger") { worst = "warn"; worstFf = ffId; }
+    if (s === "danger") {
+      worst = "danger";
+      worstFf = ffId;
+      break;
+    }
+    if (s === "warn" && worst !== "danger") {
+      worst = "warn";
+      worstFf = ffId;
+    }
   }
 
   const badge = document.getElementById("teamStatusBadge");
@@ -544,19 +715,25 @@ function updateTeamStatusPanel() {
 
   if (worst === "danger") {
     setBadge(badge, "danger", "DANGER");
-    if (box) box.innerHTML = `<div class="status-title">Critical Condition</div><div class="status-desc">Highest risk: ${FF_NAMES[worstFf] || worstFf}</div>`;
+    if (box)
+      box.innerHTML = `<div class="status-title">Critical Condition</div><div class="status-desc">Highest risk: ${
+        escapeHtml(FF_NAMES[worstFf] || worstFf || "—")
+      }</div>`;
   } else if (worst === "warn") {
     setBadge(badge, "warn", "WARNING");
-    if (box) box.innerHTML = `<div class="status-title">Warning Detected</div><div class="status-desc">Watch: ${FF_NAMES[worstFf] || worstFf}</div>`;
+    if (box)
+      box.innerHTML = `<div class="status-title">Warning Detected</div><div class="status-desc">Watch: ${
+        escapeHtml(FF_NAMES[worstFf] || worstFf || "—")
+      }</div>`;
   } else {
     setBadge(badge, "ok", "NOMINAL");
-    if (box) box.innerHTML = `<div class="status-title">All Systems Nominal</div><div class="status-desc">No active critical conditions detected.</div>`;
+    if (box)
+      box.innerHTML = `<div class="status-title">All Systems Nominal</div><div class="status-desc">No active critical conditions detected.</div>`;
   }
 }
 
-/* ---------------- Weather (FIXED) ---------------- */
+/* ---------------- Weather ---------------- */
 
-// Accept multiple possible keys from backend
 function pickNum(obj, keys) {
   for (const k of keys) {
     const v = toNum(obj?.[k]);
@@ -570,7 +747,6 @@ function updateWeatherUI(w, meta = {}) {
   const wEl = document.getElementById("wxWind");
   const hEl = document.getElementById("wxHum");
 
-  // tolerant mapping
   const tempC = pickNum(w, ["tempC", "temperatureC", "temperature", "temp"]);
   const windMs = pickNum(w, ["windMs", "wind_m_s", "windSpeedMs", "windSpeed", "wind"]);
   const humPct = pickNum(w, ["humidityPct", "humidity", "rh", "relativeHumidity"]);
@@ -582,15 +758,16 @@ function updateWeatherUI(w, meta = {}) {
   const riskRaw = String(w?.risk ?? w?.riskLevel ?? w?.fireRisk ?? "LOW").toUpperCase();
   const badge = document.getElementById("weatherBadge");
   if (riskRaw === "HIGH" || riskRaw === "EXTREME") setBadge(badge, "danger", riskRaw);
-  else if (riskRaw === "MEDIUM" || riskRaw === "MODERATE") setBadge(badge, "warn", riskRaw === "MODERATE" ? "MEDIUM" : riskRaw);
+  else if (riskRaw === "MEDIUM" || riskRaw === "MODERATE")
+    setBadge(badge, "warn", riskRaw === "MODERATE" ? "MEDIUM" : riskRaw);
   else setBadge(badge, "ok", riskRaw);
 
   const hint = document.getElementById("wxHint");
   if (hint) {
     const src = w?.source ? ` (${w.source})` : "";
     const where = meta?.where ? ` • ${meta.where}` : "";
-    hint.textContent = (w?.observedAt || w?.time || w?.ts)
-      ? `Weather updated${src}${where}: ${w.observedAt || w.time || w.ts}`
+    hint.textContent = w?.observedAt
+      ? `Weather updated${src}${where}: ${w.observedAt}`
       : `Weather updated${src}${where}.`;
   }
 }
@@ -606,17 +783,13 @@ async function pollWeatherIfDue() {
   if (now - state.lastWeatherAt < CONFIG.WEATHER_POLL_MS) return;
 
   const hint = document.getElementById("wxHint");
-
-  // Prefer leader coords, but fallback if unavailable so UI is never empty
   const leader = getLeaderCoords();
+
   const lat = leader?.lat ?? CONFIG.WEATHER_FALLBACK.lat;
   const lon = leader?.lon ?? CONFIG.WEATHER_FALLBACK.lon;
-
   const where = leader ? "Leader (FF_A) location" : CONFIG.WEATHER_FALLBACK.label;
 
-  if (!leader && hint) {
-    hint.textContent = "Leader location not available yet — using fallback weather location…";
-  }
+  if (!leader && hint) hint.textContent = "Leader location not available yet — using fallback weather location…";
 
   try {
     const w = await apiWeather(lat, lon);
@@ -626,7 +799,6 @@ async function pollWeatherIfDue() {
     console.warn("weather failed:", e);
     setBadge(document.getElementById("weatherBadge"), "warn", "N/A");
     if (hint) hint.textContent = `Weather fetch failed (${where}). Check /api/weather.`;
-    // still move the timer forward so it doesn't spam
     state.lastWeatherAt = now;
   }
 }
@@ -634,7 +806,9 @@ async function pollWeatherIfDue() {
 /* ---------------- Grafana embeds ---------------- */
 
 function buildGrafanaSoloUrl(panelId) {
-  const base = `${GRAFANA.BASE}/d-solo/${encodeURIComponent(GRAFANA.DASH_UID)}/${encodeURIComponent(GRAFANA.DASH_SLUG)}`;
+  const base = `${GRAFANA.BASE}/d-solo/${encodeURIComponent(GRAFANA.DASH_UID)}/${encodeURIComponent(
+    GRAFANA.DASH_SLUG
+  )}`;
   const params = new URLSearchParams();
   params.set("orgId", String(GRAFANA.ORG_ID));
   params.set("panelId", String(panelId));
@@ -671,24 +845,81 @@ function updateGrafanaFrames(force = false) {
   }
 }
 
-function ytEmbedUrl(videoId, startSec, endSec) {
+/* ---------------- Team video (inject UI if missing) ---------------- */
+
+function ensureTeamVideoSlot() {
+  // We try to place the video under the Operator Metrics panel, under envCards if possible.
+  let frame = document.getElementById("teamVideoFrame");
+  let hint = document.getElementById("videoHint");
+
+  if (frame && hint) return { frame, hint };
+
+  const envCards = document.getElementById("envCards");
+  const metricsHint = document.getElementById("metricsHint");
+  const metricsPanelBody = envCards?.closest(".panel-body");
+
+  if (!metricsPanelBody) return { frame: null, hint: null };
+
+  const wrap = document.createElement("div");
+  wrap.style.marginTop = "12px";
+  wrap.style.borderTop = "1px solid rgba(15,23,42,.08)";
+  wrap.style.paddingTop = "12px";
+
+  const title = document.createElement("div");
+  title.textContent = "Livestream";
+  title.style.fontWeight = "1100";
+  title.style.fontSize = "13px";
+  title.style.marginBottom = "8px";
+  wrap.appendChild(title);
+
+  frame = document.createElement("iframe");
+  frame.id = "teamVideoFrame";
+  frame.src = "about:blank";
+  frame.loading = "lazy";
+  frame.referrerPolicy = "no-referrer";
+  frame.allow =
+    "autoplay; encrypted-media; picture-in-picture; fullscreen; clipboard-write";
+  frame.style.width = "100%";
+  frame.style.height = "180px"; // smaller
+  frame.style.border = "1px solid rgba(15,23,42,.10)";
+  frame.style.borderRadius = "14px";
+  frame.style.background = "#fff";
+  wrap.appendChild(frame);
+
+  hint = document.createElement("div");
+  hint.id = "videoHint";
+  hint.textContent = "—";
+  hint.style.marginTop = "8px";
+  hint.style.color = "var(--muted)";
+  hint.style.fontSize = "12px";
+  hint.style.fontWeight = "900";
+  wrap.appendChild(hint);
+
+  // Insert before metricsHint if present, else append
+  if (metricsHint && metricsHint.parentElement === metricsPanelBody) {
+    metricsPanelBody.insertBefore(wrap, metricsHint);
+  } else {
+    metricsPanelBody.appendChild(wrap);
+  }
+
+  return { frame, hint };
+}
+
+function ytEmbedUrlNocookie(videoId, startSec) {
   const params = new URLSearchParams();
-  params.set("enablejsapi", "1");
-  params.set("origin", window.location.origin);
   params.set("autoplay", "1");
-  params.set("mute", "1");            // avoids autoplay blocking
+  params.set("mute", "1"); // to satisfy autoplay policies
   params.set("controls", "0");
   params.set("rel", "0");
   params.set("modestbranding", "1");
   params.set("playsinline", "1");
+  params.set("start", String(Math.max(0, Math.floor(startSec || 0))));
 
-  // Start/end define the segment; loop requires playlist=<id> + loop=1
-  params.set("start", String(Math.max(0, Math.floor(startSec))));
-  params.set("end", String(Math.max(0, Math.floor(endSec))));
+  // loop whole video; we enforce segment looping ourselves with a 60s reload timer
   params.set("loop", "1");
   params.set("playlist", videoId);
 
-  return `https://www.youtube.com/embed/${encodeURIComponent(videoId)}?${params.toString()}`;
+  return `https://www.youtube-nocookie.com/embed/${encodeURIComponent(videoId)}?${params.toString()}`;
 }
 
 function setVideoHint(text) {
@@ -696,15 +927,31 @@ function setVideoHint(text) {
   if (el) el.textContent = text || "—";
 }
 
-// Updates the Team tab video based on selectedFF
+function stopVideoLoopTimer() {
+  try {
+    if (state.video.loopTimer) clearInterval(state.video.loopTimer);
+  } catch (_) {}
+  state.video.loopTimer = 0;
+}
+
+function startVideoLoopTimer(ff, baseSrc) {
+  stopVideoLoopTimer();
+  if (!(ff === "FF_B" || ff === "FF_C" || ff === "FF_D")) return;
+
+  // reload every SEG_SECONDS to "loop segment"
+  state.video.loopTimer = setInterval(() => {
+    const frame = document.getElementById("teamVideoFrame");
+    if (!frame) return;
+    // cache-buster forces restart at "start="
+    frame.src = `${baseSrc}${baseSrc.includes("?") ? "&" : "?"}cb=${Date.now()}`;
+  }, VIDEO.SEG_SECONDS * 1000);
+}
+
 function updateTeamVideo(force = false) {
-  const frame = document.getElementById("teamVideoFrame");
+  const { frame } = ensureTeamVideoSlot();
   if (!frame) return;
 
   const ff = state.selectedFF;
-
-  // Store last video src to avoid flicker/reloads when not changing FF
-  if (!state.video) state.video = { lastFf: null, lastSrc: "" };
 
   let src = "about:blank";
   let hint = "";
@@ -714,21 +961,21 @@ function updateTeamVideo(force = false) {
     hint = "FF_A live feed (mtxmedia).";
   } else if (ff === "FF_B" || ff === "FF_C" || ff === "FF_D") {
     const start = VIDEO.START_BY_FF[ff] ?? 0;
-    const end = start + VIDEO.SEG_SECONDS;
-    src = ytEmbedUrl(VIDEO.YT_VIDEO_ID, start);
-    hint = `${ff} demo feed (YouTube segment ${start}s → ${end}s, loops).`;
+    src = ytEmbedUrlNocookie(VIDEO.YT_VIDEO_ID, start);
+    hint = `${ff} demo feed (loops every ${VIDEO.SEG_SECONDS}s from ${start}s).`;
   } else {
     hint = "No video source for this unit.";
   }
 
   if (force || state.video.lastFf !== ff || state.video.lastSrc !== src) {
+    stopVideoLoopTimer();
     frame.src = src;
     state.video.lastFf = ff;
     state.video.lastSrc = src;
     setVideoHint(hint);
+    startVideoLoopTimer(ff, src);
   }
 }
-
 
 /* ---------------- Team page ---------------- */
 
@@ -763,9 +1010,13 @@ async function updateTeamPage() {
   const myPos = state.lastPos[ff];
   const distEl = document.getElementById("distVal");
   if (
-    distEl && leaderPos && myPos &&
-    isNum(leaderPos.lat) && isNum(leaderPos.lon) &&
-    isNum(myPos.lat) && isNum(myPos.lon)
+    distEl &&
+    leaderPos &&
+    myPos &&
+    isNum(leaderPos.lat) &&
+    isNum(leaderPos.lon) &&
+    isNum(myPos.lat) &&
+    isNum(myPos.lon)
   ) {
     const d = distanceMeters([leaderPos.lat, leaderPos.lon], [myPos.lat, myPos.lon]);
     distEl.textContent = d >= 1000 ? `${fmt(d / 1000, 2)} km` : `${fmt(d, 0)} m`;
@@ -785,13 +1036,16 @@ async function updateTeamPage() {
 
   if (sev === "danger") {
     setBadge(b, "danger", "DANGER");
-    if (big) big.innerHTML = `<div class="ff-status-title">Status: In Danger</div><div class="ff-status-desc">Immediate action recommended.</div>`;
+    if (big)
+      big.innerHTML = `<div class="ff-status-title">Status: In Danger</div><div class="ff-status-desc">Immediate action recommended.</div>`;
   } else if (sev === "warn") {
     setBadge(b, "warn", "WARNING");
-    if (big) big.innerHTML = `<div class="ff-status-title">Status: Warning</div><div class="ff-status-desc">Monitor closely.</div>`;
+    if (big)
+      big.innerHTML = `<div class="ff-status-title">Status: Warning</div><div class="ff-status-desc">Monitor closely.</div>`;
   } else {
     setBadge(b, "ok", "SAFE");
-    if (big) big.innerHTML = `<div class="ff-status-title">Status: Safe</div><div class="ff-status-desc">No immediate risk detected.</div>`;
+    if (big)
+      big.innerHTML = `<div class="ff-status-title">Status: Safe</div><div class="ff-status-desc">No immediate risk detected.</div>`;
   }
 
   updateTeamVideo(false);
@@ -827,10 +1081,11 @@ function updateRiskPage() {
   }
 
   if (tbody) {
-    tbody.innerHTML = rows.map((r) => {
-      const sev = sevFromScore01(r.riskScore);
-      const active = r.ffId === state.selectedFF ? ' style="outline:2px solid rgba(37,99,235,.25)"' : "";
-      return `
+    tbody.innerHTML = rows
+      .map((r) => {
+        const sev = sevFromScore01(r.riskScore);
+        const active = r.ffId === state.selectedFF ? ' style="outline:2px solid rgba(37,99,235,.25)"' : "";
+        return `
         <tr class="risk-row" data-ff="${escapeHtml(r.ffId)}"${active}>
           <td><b>${escapeHtml(r.ffId)}</b></td>
           <td><span class="pill ${sev}">${isNum(r.riskScore) ? fmt(r.riskScore, 2) : "—"}</span></td>
@@ -841,12 +1096,14 @@ function updateRiskPage() {
           <td>${isNum(r.fatigueIndex) ? fmt(r.fatigueIndex, 2) : "—"}</td>
         </tr>
       `;
-    }).join("");
+      })
+      .join("");
 
     tbody.querySelectorAll(".risk-row").forEach((tr) => {
       tr.addEventListener("click", () => {
         const ff = tr.dataset.ff;
         if (!ff) return;
+
         state.selectedFF = ff;
 
         document.querySelectorAll(".subtab").forEach((b) =>
@@ -873,7 +1130,10 @@ function updateRiskPage() {
   if (teamRiskVal) teamRiskVal.textContent = isNum(teamAvg) ? fmt(teamAvg, 2) : "—";
 
   const worstUnitVal = document.getElementById("worstUnitVal");
-  if (worstUnitVal) worstUnitVal.textContent = worst ? `${worst.ffId} (${isNum(worst.riskScore) ? fmt(worst.riskScore, 2) : "—"})` : "—";
+  if (worstUnitVal)
+    worstUnitVal.textContent = worst
+      ? `${worst.ffId} (${isNum(worst.riskScore) ? fmt(worst.riskScore, 2) : "—"})`
+      : "—";
 
   const badge = document.getElementById("teamRiskBadge");
   const sev = sevFromScore01(teamAvg);
@@ -883,8 +1143,20 @@ function updateRiskPage() {
 function initRiskActions() {
   document.getElementById("btnEvacuateTeam")?.addEventListener("click", async () => {
     try {
-      const res = await apiAction({ teamId: CONFIG.TEAM, ffId: "ALL", action: "EVACUATE_TEAM", note: "Operator initiated evacuation" });
-      pushActionLog({ type: "action", action: "EVACUATE_TEAM", teamId: CONFIG.TEAM, ffId: "ALL", observedAt: new Date().toISOString(), id: res?.id || "" });
+      const res = await apiAction({
+        teamId: CONFIG.TEAM,
+        ffId: "ALL",
+        action: "EVACUATE_TEAM",
+        note: "Operator initiated evacuation",
+      });
+      pushActionLog({
+        type: "action",
+        action: "EVACUATE_TEAM",
+        teamId: CONFIG.TEAM,
+        ffId: "ALL",
+        observedAt: new Date().toISOString(),
+        id: res?.id || "",
+      });
       flashToast("Evacuation command sent");
       safeCall(updateAlertsPage);
     } catch (e) {
@@ -896,8 +1168,20 @@ function initRiskActions() {
   document.getElementById("btnMedicalSelected")?.addEventListener("click", async () => {
     const ff = state.selectedFF || "FF_A";
     try {
-      const res = await apiAction({ teamId: CONFIG.TEAM, ffId: ff, action: "MEDICAL_ATTENTION", note: "Operator requested medical attention" });
-      pushActionLog({ type: "action", action: "MEDICAL_ATTENTION", teamId: CONFIG.TEAM, ffId: ff, observedAt: new Date().toISOString(), id: res?.id || "" });
+      const res = await apiAction({
+        teamId: CONFIG.TEAM,
+        ffId: ff,
+        action: "MEDICAL_ATTENTION",
+        note: "Operator requested medical attention",
+      });
+      pushActionLog({
+        type: "action",
+        action: "MEDICAL_ATTENTION",
+        teamId: CONFIG.TEAM,
+        ffId: ff,
+        observedAt: new Date().toISOString(),
+        id: res?.id || "",
+      });
       flashToast(`Medical request sent for ${ff}`);
       safeCall(updateAlertsPage);
     } catch (e) {
@@ -909,13 +1193,21 @@ function initRiskActions() {
 
 /* ---------------- Alerts page ---------------- */
 
-function formatWhen(iso) { try { return new Date(iso).toLocaleString(); } catch { return iso || "—"; } }
+function formatWhen(iso) {
+  try {
+    return new Date(iso).toLocaleString();
+  } catch {
+    return iso || "—";
+  }
+}
 
 function normalizeAlertItem(a) {
   const sev = String(a?.severity || a?.sev || "info").toUpperCase();
   let sevClass = "ok";
-  if (sev.includes("HIGH") || sev.includes("CRIT") || sev.includes("DANGER") || sev.includes("RED")) sevClass = "danger";
+  if (sev.includes("HIGH") || sev.includes("CRIT") || sev.includes("DANGER") || sev.includes("RED"))
+    sevClass = "danger";
   else if (sev.includes("MED") || sev.includes("WARN") || sev.includes("YELL")) sevClass = "warn";
+
   return {
     kind: "alert",
     observedAt: a?.observedAt || a?._time || "",
@@ -951,7 +1243,9 @@ async function updateAlertsPage() {
     const arr = Array.isArray(a?.alerts) ? a.alerts : [];
     items = items.concat(arr.map(normalizeAlertItem));
     state.alertsCache = arr;
-  } catch (e) { console.warn(e); }
+  } catch (e) {
+    console.warn(e);
+  }
 
   items = items.concat((state.actionLog || []).map(normalizeActionItem));
   items.sort((x, y) => String(y.observedAt || "").localeCompare(String(x.observedAt || "")));
@@ -967,28 +1261,34 @@ async function updateAlertsPage() {
     : items.find((i) => i.sevClass === "warn")
     ? "warn"
     : "ok";
-
   setBadge(badge, worst, worst === "danger" ? "DANGER" : worst === "warn" ? "WARNING" : "NOMINAL");
 
-  log.innerHTML = items.slice(0, 200).map((i) => `
+  log.innerHTML = items
+    .slice(0, 200)
+    .map(
+      (i) => `
     <div class="log-item">
       <div class="log-top">
         <div>
-          <div class="log-title">${escapeHtml(i.title)} ${i.ffId ? `<span class="pill ${i.sevClass}">${escapeHtml(i.ffId)}</span>` : ""}</div>
+          <div class="log-title">${escapeHtml(i.title)} ${
+        i.ffId ? `<span class="pill ${i.sevClass}">${escapeHtml(i.ffId)}</span>` : ""
+      }</div>
           <div class="log-meta">${escapeHtml(formatWhen(i.observedAt))} • ${i.kind.toUpperCase()}</div>
         </div>
         <span class="badge ${i.sevClass}">${escapeHtml(i.sevText)}</span>
       </div>
       ${i.detail ? `<div class="log-detail">${escapeHtml(i.detail)}</div>` : ""}
     </div>
-  `).join("");
+  `
+    )
+    .join("");
 }
 
-/* ---------------- Medical page (ECG WebSocket) ---------------- */
+/* ---------------- Medical page (unchanged from your ref) ---------------- */
 
 const ECG = { ws: null, connected: false, fs: 130.0, lastTs: null, lastCount: null, samples: [], maxSec: 12.0, raf: 0 };
 
-function s24leToInt(b0, b1, b2) { let v = (b0) | (b1 << 8) | (b2 << 16); if (v & 0x00800000) v |= 0xFF000000; return v | 0; }
+function s24leToInt(b0, b1, b2) { let v = (b0) | (b1 << 8) | (b2 << 16); if (v & 0x00800000) v |= 0xff000000; return v | 0; }
 
 function parseEcg1Bundle(u8) {
   if (!u8 || u8.length < 9) return [];
@@ -1111,6 +1411,35 @@ function ecgConnect(team, ff) {
   ECG.ws = ws;
 }
 
+function renderBarRow(metricKey, label, value01) {
+  const clamp01 = (x) => Math.max(0, Math.min(1, x));
+  const levelLabel = (x01) => {
+    if (x01 == null || Number.isNaN(x01)) return "—";
+    if (x01 < 0.33) return "Low";
+    if (x01 < 0.66) return "Moderate";
+    return "High";
+  };
+
+  const v = value01 == null ? null : clamp01(Number(value01));
+  const pct = v == null || Number.isNaN(v) ? 0 : Math.round(v * 100);
+  const lvl = levelLabel(v);
+
+  let sev = "ok";
+  if (v == null || Number.isNaN(v)) sev = "warn";
+  else if (v >= 0.66) sev = "danger";
+  else if (v >= 0.33) sev = "warn";
+
+  const valTxt = v == null || Number.isNaN(v) ? "—" : `${pct}% · ${lvl}`;
+
+  return `
+    <div class="bar-row ${sev}" data-metric="${escapeHtml(metricKey)}">
+      <div class="bar-label">${escapeHtml(label)}</div>
+      <div class="bar-track"><div class="bar-fill" style="width:${pct}%;"></div></div>
+      <div class="bar-val">${escapeHtml(valTxt)}</div>
+    </div>
+  `;
+}
+
 function updateMedicalSidePanels() {
   const ff = document.getElementById("med-ff")?.value || "FF_A";
   const m = state.latestByFf[ff] || {};
@@ -1119,25 +1448,28 @@ function updateMedicalSidePanels() {
   const pm = document.getElementById("polar-metrics");
   const bars = document.getElementById("medical-bars");
 
-  const card = (k, v) => `<div class="metric-card"><div class="m-v">${escapeHtml(v)}</div><div class="m-l">${escapeHtml(k)}</div></div>`;
+  const card = (k, v) =>
+    `<div class="metric-card"><div class="m-v">${escapeHtml(v)}</div><div class="m-l">${escapeHtml(
+      k
+    )}</div></div>`;
 
   if (mm) {
     mm.innerHTML = [
       card("WS", ECG.connected ? "LIVE" : "OFF"),
-      card("ECG fs", isNum(ECG.fs) ? `${fmt(ECG.fs,1)} Hz` : "—"),
+      card("ECG fs", isNum(ECG.fs) ? `${fmt(ECG.fs, 1)} Hz` : "—"),
       card("Samples", ECG.samples.length ? String(ECG.samples.length) : "—"),
-      card("Window", `${ECG.maxSec.toFixed(0)}s`)
+      card("Window", `${ECG.maxSec.toFixed(0)}s`),
     ].join("");
   }
 
   if (pm) {
     pm.innerHTML = [
-      card("HR", isNum(m.hrBpm) ? `${fmt(m.hrBpm,0)} bpm` : "—"),
-      card("RR", isNum(m.rrMs) ? `${fmt(m.rrMs,0)} ms` : "—"),
-      card("RMSSD", isNum(m.rmssdMs) ? `${fmt(m.rmssdMs,1)} ms` : "—"),
-      card("SDNN", isNum(m.sdnnMs) ? `${fmt(m.sdnnMs,1)} ms` : "—"),
-      card("pNN50", isNum(m.pnn50Pct) ? `${fmt(m.pnn50Pct,1)} %` : "—"),
-      card("Risk", isNum(m.riskScore) ? fmt(m.riskScore,2) : "—")
+      card("HR", isNum(m.hrBpm) ? `${fmt(m.hrBpm, 0)} bpm` : "—"),
+      card("RR", isNum(m.rrMs) ? `${fmt(m.rrMs, 0)} ms` : "—"),
+      card("RMSSD", isNum(m.rmssdMs) ? `${fmt(m.rmssdMs, 1)} ms` : "—"),
+      card("SDNN", isNum(m.sdnnMs) ? `${fmt(m.sdnnMs, 1)} ms` : "—"),
+      card("pNN50", isNum(m.pnn50Pct) ? `${fmt(m.pnn50Pct, 1)} %` : "—"),
+      card("Risk", isNum(m.riskScore) ? fmt(m.riskScore, 2) : "—"),
     ].join("");
   }
 
@@ -1152,7 +1484,9 @@ function updateMedicalSidePanels() {
   }
 }
 
-function updateMedicalPage() { updateMedicalSidePanels(); }
+function updateMedicalPage() {
+  updateMedicalSidePanels();
+}
 
 function initMedical() {
   document.getElementById("btn-ecg-connect")?.addEventListener("click", () => {
@@ -1169,11 +1503,26 @@ function initMedical() {
     const team = document.getElementById("med-team")?.value || CONFIG.TEAM;
     const ff = document.getElementById("med-ff")?.value || "FF_A";
     try {
-      const res = await apiAction({ teamId: team, ffId: ff, action: "MEDICAL_ATTENTION", note: "Medical tab request" });
-      pushActionLog({ type: "action", action: "MEDICAL_ATTENTION", teamId: team, ffId: ff, observedAt: new Date().toISOString(), id: res?.id || "" });
+      const res = await apiAction({
+        teamId: team,
+        ffId: ff,
+        action: "MEDICAL_ATTENTION",
+        note: "Medical tab request",
+      });
+      pushActionLog({
+        type: "action",
+        action: "MEDICAL_ATTENTION",
+        teamId: team,
+        ffId: ff,
+        observedAt: new Date().toISOString(),
+        id: res?.id || "",
+      });
       flashToast(`Medical request sent for ${ff}`);
       safeCall(updateAlertsPage);
-    } catch (e) { console.warn(e); flashToast("Failed to send medical request"); }
+    } catch (e) {
+      console.warn(e);
+      flashToast("Failed to send medical request");
+    }
   });
 
   if (document.getElementById("ecg-canvas") && !ECG.raf) ECG.raf = requestAnimationFrame(drawEcg);
@@ -1216,22 +1565,30 @@ async function poll() {
 
     state.latestByFf = { ...state.latestByFf, ...next };
 
+    // Render fixed A-D first
     for (const ffId of FF_FIXED) {
       const m = state.latestByFf[ffId] || { ffId };
       upsertMarkerAlways(ffId, m);
     }
 
+    // Extra members (if any)
     for (const [ffId, m] of Object.entries(state.latestByFf)) {
       if (FF_FIXED.includes(ffId)) continue;
       upsertMarkerAlways(ffId, m);
     }
+
+    // ✅ incident circle updated after markers
+    updateIncidentCircle();
+
+    // save coords occasionally
+    saveLastPos();
 
     centerOnLeader(false);
 
     updateDashboardTiles();
     updateTeamStatusPanel();
 
-    await pollWeatherIfDue();   // <-- weather fix lives here
+    await pollWeatherIfDue();
     await pollActionsIfDue();
 
     if (state.page === "team") await updateTeamPage();
@@ -1251,6 +1608,8 @@ document.addEventListener("DOMContentLoaded", () => {
   tickClock();
   setInterval(tickClock, 1000);
 
+  loadLastPos(); // ✅ restore last known coords
+
   initTabs();
   initMap();
   loadActionLog();
@@ -1266,19 +1625,26 @@ document.addEventListener("DOMContentLoaded", () => {
 
       if (state.page === "map" && team === CONFIG.TEAM && !ev.shiftKey && !ev.altKey && !ev.metaKey) {
         centerOnLeader(true);
-        try { window._markers?.["FF_A"]?.openPopup(); } catch (_) {}
+        try {
+          window._markers?.["FF_A"]?.openPopup();
+        } catch (_) {}
         flashToast(`Zoomed to ${team} leader (FF_A)`);
         return;
       }
 
       state.selectedFF = "FF_A";
-      document.querySelectorAll(".subtab").forEach((b) => b.classList.toggle("active", b.dataset.ff === "FF_A"));
+      document
+        .querySelectorAll(".subtab")
+        .forEach((b) => b.classList.toggle("active", b.dataset.ff === "FF_A"));
+
       updateGrafanaFrames(true);
       updateTeamVideo(true);
       showPage("team");
     });
   });
 
+  // Ensure the video slot exists early (team tab)
+  ensureTeamVideoSlot();
   updateTeamVideo(true);
   updateGrafanaFrames(true);
 

@@ -57,16 +57,51 @@ services:
       - grafana-data:/var/lib/grafana
     depends_on:
       - influxdb
+    environment:
+      - GF_SECURITY_ALLOW_EMBEDDING=true
+
+      # ✅ so iframe doesn't show login
+      - GF_AUTH_ANONYMOUS_ENABLED=true
+      - GF_AUTH_ANONYMOUS_ORG_ROLE=Viewer
+
+      # ✅ so "Share" links use your real address (optional but recommended)
+      - GF_SERVER_ROOT_URL=http://192.168.2.12:8087
+      - GF_SERVER_DOMAIN=192.168.2.12
+      - GF_SERVER_SERVE_FROM_SUB_PATH=false
+
+      # ✅ helps if cookies/auth weirdness happens in iframes (safe to keep)
+      - GF_SECURITY_COOKIE_SAMESITE=disabled
+
+  command-center-api:
+    image: python:3.11-slim
+    container_name: command-center-api
+    restart: unless-stopped
+    working_dir: /app
+    volumes:
+      - /home/server/Desktop/website:/app
+    ports:
+      - "7070:7070"
+    command: ["sh", "-c", "pip install --no-cache-dir fastapi 'uvicorn[standard]' influxdb-client requests paho-mqtt && uvicorn api:app --host 0.0.0.0 --port 7070"]
+    environment:
+      ORION_BASE: "http://fiware-orion:1026"
+      INFLUX_URL: "http://influxdb:8086"
+      INFLUX_TOKEN: "${INFLUX_TOKEN}"
+      INFLUX_ORG: "${INFLUX_ORG}"
+      INFLUX_BUCKET: "${INFLUX_BUCKET}"
+      WEATHER_AGENT_URL: "http://weather-agent:8000"
+
 
   firefighter-ui:
     image: nginx:alpine
     container_name: firefighter-ui
     restart: unless-stopped
+    depends_on:
+      - command-center-api
     ports:
       - "8080:80"
-    # Optional: if you serve your own UI files
-    # volumes:
-    #   - ./ui:/usr/share/nginx/html:ro
+    volumes:
+      - /home/server/Desktop/website:/usr/share/nginx/html:ro
+      - /home/server/Desktop/website/nginx-ui.conf:/etc/nginx/conf.d/default.conf:ro
 
   bridge:
     image: python:3.11-slim
@@ -82,7 +117,7 @@ services:
       INFLUX_TOKEN: "${INFLUX_TOKEN}"
       INFLUX_ORG: "${INFLUX_ORG}"
       INFLUX_BUCKET: "${INFLUX_BUCKET}"
-      INFLUX_MEASUREMENT: "${INFLUX_MEASUREMENT}"
+#      INFLUX_MEASUREMENT: "${INFLUX_MEASUREMENT}"
     volumes:
       - ./bridge:/app
     working_dir: /app

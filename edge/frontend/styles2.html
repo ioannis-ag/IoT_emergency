@@ -425,3 +425,40 @@ body {
 .toast.danger { border-color: rgba(239, 68, 68, .24); }
 .toast .tt { font-weight: 1100; margin-bottom: 4px; }
 .toast .tb { color: var(--muted); font-size: 13px; }
+
+/* =========================
+   LEAFLET FF MARKER DOTS FIX
+   ========================= */
+
+/* Make sure the Leaflet marker container itself isn't hidden */
+.leaflet-marker-icon,
+.leaflet-marker-pane,
+.leaflet-pane {
+  visibility: visible !important;
+  opacity: 1 !important;
+}
+
+/* Your divIcon dot */
+.ff-marker-wrap{
+  width: 18px;
+  height: 18px;
+  border-radius: 999px;
+  border: 2px solid #fff;
+  box-shadow: 0 10px 18px rgba(15, 23, 42, .18);
+}
+
+/* Colors (these MUST exist or dots look invisible) */
+.ff-ok { background: var(--ok); }
+.ff-warn { background: var(--warn); }
+.ff-danger { background: var(--danger); }
+
+/* If you want pulsing danger */
+.ff-danger{
+  animation: ffPulse 1.2s infinite;
+}
+
+@keyframes ffPulse {
+  0%   { box-shadow: 0 0 0 0 rgba(239,68,68,.28), 0 10px 18px rgba(15,23,42,.18); }
+  70%  { box-shadow: 0 0 0 14px rgba(239,68,68,0),   0 10px 18px rgba(15,23,42,.18); }
+  100% { box-shadow: 0 0 0 0 rgba(239,68,68,0),      0 10px 18px rgba(15,23,42,.18); }
+}

@@ -1,11 +1,13 @@
 // =========================================================
 // EDGE DASHBOARD — STABLE + DEMO SAFE
-// Fixes:
-// - Ensures popup globals always export (even if later code fails)
-// - Removes YouTube double-load (loads iframe API once here)
-// - Stops camera reader.js /whep spam by NOT embedding that camera webpage
-//   (still allows opening camera in new tab)
-// - Adds basic boot markers for debugging
+// Features:
+// - Leaflet map + trails + fit-to-everyone + incident ring
+// - MQTT live data
+// - YouTube segments (loaded once, no double-load)
+// - MediaMTX HLS live camera for FF_A (embedded in-card)
+// - Orion CommandAction polling with full-screen popup overlay
+//   * DOES NOT show old action on refresh (primed lastId)
+// - Exposes window.showPopup / window.closePopup for console testing
 // =========================================================
 
 console.log("✅ app.js start", new Date().toISOString());
@@ -18,6 +20,9 @@ window.addEventListener("unhandledrejection", (e) => {
   console.error("🔥 unhandled rejection:", e.reason);
 });
 
+// =========================================================
+// CONFIG
+// =========================================================
 const CONFIG = {
   MQTT_HOST: window.location.hostname || "localhost",
   MQTT_PORT: 9001,
@@ -71,6 +76,7 @@ function forcePopupOverlayStyleOnce() {
   if (!root || root.dataset.overlayForced) return;
   root.dataset.overlayForced = "1";
 
+  // keep safe defaults even if CSS fails to load
   root.style.position = "fixed";
   root.style.inset = "0";
   root.style.zIndex = "2147483647";
@@ -88,10 +94,19 @@ function closePopup() {
 }
 
 function showPopup(title, message) {
-  const { root, title: t, msg } = popupEls();
+  const { root, title: t, msg, card } = popupEls();
   if (!root || !t || !msg) return;
 
   forcePopupOverlayStyleOnce();
+
+  // Optional severity accent
+  if (card) {
+    card.classList.remove("sev-danger", "sev-warn", "sev-ok");
+    const up = String(title || "").toUpperCase();
+    if (up.includes("EVAC") || up.includes("🚨")) card.classList.add("sev-danger");
+    else if (up.includes("MEDICAL") || up.includes("🩺")) card.classList.add("sev-warn");
+    else card.classList.add("sev-ok");
+  }
 
   t.textContent = title || "ALERT";
   msg.textContent = message || "";
@@ -110,10 +125,12 @@ function wirePopupOnce() {
   ok?.addEventListener("click", closePopup);
   x?.addEventListener("click", closePopup);
 
+  // Click outside card closes
   root.addEventListener("click", (e) => {
     if (e.target === root) closePopup();
   });
 
+  // ESC closes
   window.addEventListener("keydown", (e) => {
     if (e.key === "Escape") closePopup();
   });
@@ -174,26 +191,23 @@ async function pollCommandActions() {
     ].filter(Boolean).join("\n");
 
     showPopup(prettyAction(action), lines);
-  } catch (e) {
-    // Keep demo stable; log once if you want:
-    // console.warn("CommandAction poll failed:", e?.message || e);
+  } catch {
+    // demo-safe: ignore transient errors
   }
 }
 
+// ✅ FIX: do NOT show latest action on refresh
 async function startCommandActionPolling() {
   try {
-    // Prime: read latest action once, but DO NOT show it
     const ent = await fetchLatestCommandAction();
-    actionPopupState.lastId = ent?.id || null;
+    actionPopupState.lastId = ent?.id || null; // prime, no popup
   } catch {
     // ignore
   }
-
-  // Now start polling normally (will only show future actions)
   setInterval(pollCommandActions, CONFIG.ACTION_POLL_MS);
 }
 
-// ✅ EXPORT POPUP GLOBALS EARLY (so you can always test from console)
+// Expose helpers for manual testing
 window.showPopup = showPopup;
 window.closePopup = closePopup;
 window._pollCommandActions = pollCommandActions;
@@ -203,12 +217,11 @@ console.log("✅ popup globals exported");
 // CAMERA CONFIG
 // =========================================================
 const YT_VIDEO_ID = "mphHFk5IXsQ";
+
+// MediaMTX HLS for FF_A
+// If your path is NOT "cam", change it here.
 const CAMERA_URLS = {
-  // IMPORTANT:
-  // Your embedded camera page at :8889/cam is running its own reader.js
-  // and spamming POST /cam/whep 404 retries.
-  // So we DO NOT embed it. We show a "Click to open" tile instead.
-  FF_A: { type: "external", url: "http://192.168.2.13:8889/cam" },
+  FF_A: { type: "hls", url: "http://192.168.2.13:8888/cam/index.m3u8" },
 
   // YouTube segments:
   FF_B: { type: "youtube", videoId: YT_VIDEO_ID, start: 10, dur: 40 },
@@ -219,10 +232,20 @@ const CAMERA_URLS = {
 function openCamera(ffId) {
   const cam = CAMERA_URLS[ffId];
   if (!cam) return;
+
   if (cam.type === "youtube") {
     const url = `https://www.youtube.com/watch?v=${cam.videoId}&t=${cam.start || 0}s`;
     window.open(url, "_blank", "noopener");
-  } else if (cam.url) {
+    return;
+  }
+
+  if (cam.type === "hls") {
+    // open playlist for debugging if needed
+    window.open(cam.url, "_blank", "noopener");
+    return;
+  }
+
+  if (cam.url) {
     window.open(cam.url, "_blank", "noopener");
   }
 }
@@ -399,16 +422,23 @@ function maybeCenterOnLeader() {
 // =========================================================
 function fitToEveryone() {
   const pts = [];
+
   for (const ffId of FF_ORDER) {
     const m = state.members[ffId];
     if (m && isNum(m.lat) && isNum(m.lon)) pts.push([m.lat, m.lon]);
   }
+
   if (state.incident && isNum(state.incident.lat) && isNum(state.incident.lon)) {
     pts.push([state.incident.lat, state.incident.lon]);
   }
+
   if (!pts.length) return;
 
-  if (pts.length === 1) { map.setView(pts[0], 19); return; }
+  if (pts.length === 1) {
+    map.setView(pts[0], 19);
+    return;
+  }
+
   map.fitBounds(L.latLngBounds(pts), { padding: [30, 30], maxZoom: 19 });
 }
 
@@ -419,6 +449,58 @@ function kpiClass(level) {
   if (level === "Critical" || level === "Danger" || level === "Extreme") return "danger";
   if (level === "High" || level === "Hot") return "warn";
   return "";
+}
+
+// =========================================================
+// HLS (MediaMTX) — embed live camera for FF_A
+// Requires: <script src="https://cdn.jsdelivr.net/npm/hls.js@1/dist/hls.min.js" defer></script>
+// =========================================================
+const hlsPlayers = {}; // ffId -> Hls instance
+
+function ensureHLSPlayer(ffId) {
+  const cam = CAMERA_URLS[ffId];
+  if (!cam || cam.type !== "hls") return;
+
+  const video = document.getElementById(`hls-${ffId}`);
+  if (!video) return;
+  if (video.dataset.hlsAttached) return;
+
+  // Safari native HLS
+  if (video.canPlayType("application/vnd.apple.mpegurl")) {
+    video.src = cam.url;
+    video.muted = true;
+    video.play().catch(() => {});
+    video.dataset.hlsAttached = "1";
+    return;
+  }
+
+  // Chrome/Edge via hls.js
+  if (window.Hls && Hls.isSupported()) {
+    const hls = new Hls({
+      lowLatencyMode: true,
+      backBufferLength: 0
+    });
+    hls.loadSource(cam.url);
+    hls.attachMedia(video);
+    hls.on(Hls.Events.MANIFEST_PARSED, () => {
+      video.muted = true;
+      video.play().catch(() => {});
+    });
+    hls.on(Hls.Events.ERROR, (evt, data) => {
+      // keep demo stable; try minor recovery
+      if (data?.fatal) {
+        try {
+          hls.destroy();
+          delete hlsPlayers[ffId];
+          video.dataset.hlsAttached = "";
+          setTimeout(() => ensureHLSPlayer(ffId), 800);
+        } catch {}
+      }
+    });
+
+    hlsPlayers[ffId] = hls;
+    video.dataset.hlsAttached = "1";
+  }
 }
 
 // =========================================================
@@ -436,12 +518,29 @@ function cameraHtml(ffId) {
     `;
   }
 
-  // ✅ Demo-safe tile: no embedded reader.js, no /whep spam
-  if (cam.type === "external") {
+  if (cam.type === "hls") {
     return `
-      <div class="cam cam-empty" data-ff="${ffId}" style="display:flex;align-items:center;justify-content:center;flex-direction:column;gap:10px;">
-        <div style="font-weight:900;">LIVE CAMERA</div>
-        <div style="opacity:.85;font-size:13px;">Click to open feed</div>
+      <div class="cam" data-ff="${ffId}">
+        <video class="cam-video" id="hls-${ffId}" playsinline muted autoplay></video>
+        <div class="cam-overlay">LIVE</div>
+      </div>
+    `;
+  }
+
+  if (cam.type === "iframe") {
+    return `
+      <div class="cam" data-ff="${ffId}">
+        <iframe class="cam-iframe" src="${cam.url}" loading="lazy" referrerpolicy="no-referrer"></iframe>
+        <div class="cam-overlay">LIVE</div>
+      </div>
+    `;
+  }
+
+  if (cam.type === "mjpeg") {
+    return `
+      <div class="cam" data-ff="${ffId}">
+        <img class="cam-img" src="${cam.url}" alt="Camera ${ffId}" />
+        <div class="cam-overlay">LIVE</div>
       </div>
     `;
   }
@@ -450,7 +549,7 @@ function cameraHtml(ffId) {
 }
 
 // =========================================================
-// STABLE CARD RENDER
+// STABLE CARD RENDER (INIT ONCE, UPDATE TEXT ONLY)
 // =========================================================
 function initCardOnce(ffId) {
   const el = document.getElementById(`card-${ffId}`);
@@ -486,6 +585,10 @@ function initCardOnce(ffId) {
     </div>
   `;
 
+  // Attach HLS player once the <video> exists
+  ensureHLSPlayer(ffId);
+
+  // Card click -> zoom (ignore cam clicks)
   el.addEventListener("click", (ev) => {
     const camEl = ev.target?.closest?.(".cam");
     if (camEl) return;
@@ -496,6 +599,7 @@ function initCardOnce(ffId) {
     }
   });
 
+  // Cam click -> open full feed
   const cam = el.querySelector(".cam");
   if (cam) {
     cam.addEventListener("click", (e) => {
@@ -524,7 +628,10 @@ function updateCard(ffId) {
 
   if (!m) {
     if (nameEl) nameEl.textContent = ffId;
-    if (pillEl) { pillEl.className = "pill stale"; pillEl.textContent = "WAITING"; }
+    if (pillEl) {
+      pillEl.className = "pill stale";
+      pillEl.textContent = "WAITING";
+    }
     if (metaEl) metaEl.innerHTML = `<span>${ffId}</span><span>⏱ —</span><span>📍 —</span>`;
     if (pulseEl) pulseEl.textContent = "—";
     if (tempEl) tempEl.textContent = "—";
@@ -545,7 +652,9 @@ function updateCard(ffId) {
 
   const dist = isNum(m.distanceToLeaderM) ? `${Math.round(m.distanceToLeaderM)}m` : "—";
   const last = (m.lastSeenSec ?? null) === null ? "—" : `${m.lastSeenSec}s`;
-  if (metaEl) metaEl.innerHTML = `<span>${m.ffId}</span><span>⏱ ${last}</span><span>📍 ${dist}</span>`;
+  if (metaEl) {
+    metaEl.innerHTML = `<span>${m.ffId}</span><span>⏱ ${last}</span><span>📍 ${dist}</span>`;
+  }
 
   if (pulseEl) pulseEl.textContent = isNum(m.pulse) ? `${Math.round(m.pulse)}` : "—";
   if (tempEl) tempEl.textContent = isNum(m.temp) ? `${m.temp.toFixed(1)}°C` : "—";
@@ -650,7 +759,6 @@ function loadYouTubeAPI() {
     return;
   }
 
-  // avoid duplicates
   if (document.getElementById("yt-api")) return;
 
   const s = document.createElement("script");
@@ -689,7 +797,7 @@ function ensureYTPlayer(ffId) {
       rel: 0,
       modestbranding: 1,
       start,
-      origin: location.origin, // reduces postMessage origin issues
+      origin: location.origin,
     },
     events: {
       onReady: (e) => {
@@ -792,18 +900,26 @@ function initMap() {
   const btnAll = document.getElementById("btnShowAll");
   if (btnAll) btnAll.onclick = () => fitToEveryone();
 
+  // Popup safe immediately
   wirePopupOnce();
+
+  // Build cards once immediately (YT + HLS hosts exist)
   renderAllCards();
+
+  // Start media initializers
   loadYouTubeAPI();
+
+  // Alerts init
   renderAlerts();
 }
 
 function boot() {
-  // If libs are deferred, wait until they exist
+  // Wait for libs that were loaded with defer
   if (!window.L || !window.mqtt) {
     setTimeout(boot, 50);
     return;
   }
+  // Hls.js is optional (Safari plays HLS natively); but if you need it, include it in index.html
   initMap();
   connectMQTT();
   startCommandActionPolling();

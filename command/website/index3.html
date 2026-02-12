@@ -179,10 +179,10 @@
 
         <!-- FF tabs -->
         <div class="subtabs" id="ffTabs">
-          <button class="subtab active" data-ff="FF_A">FF_A</button>
-          <button class="subtab" data-ff="FF_B">FF_B</button>
-          <button class="subtab" data-ff="FF_C">FF_C</button>
-          <button class="subtab" data-ff="FF_D">FF_D</button>
+          <button class="subtab active" data-ff="FF_A">FF_A (Alex)</button>
+          <button class="subtab" data-ff="FF_B">FF_B (Maria)</button>
+          <button class="subtab" data-ff="FF_C">FF_C (Nikos)</button>
+          <button class="subtab" data-ff="FF_D">FF_D (Eleni)</button>
         </div>
 
         <div class="team-grid">
@@ -341,7 +341,6 @@
                 <button class="btn" id="btnMedicalSelected"><i class="fa-solid fa-kit-medical"></i> Medical Attention – Selected FF</button>
               </div>
 
-              <div class="hint" id="riskHint">Actions are POSTed to <code>/api/action</code> and shown in Alerts history.</div>
             </div>
           </div>
 
@@ -407,7 +406,7 @@
         <div class="page-head">
           <div>
             <h2>Medical</h2>
-            <div class="subtle">Live ECG (MQTT) + detailed HR/HRV & demo indexes (not medical).</div>
+            <div class="subtle">Medical assessment</div>
           </div>
           <div class="row gap">
             <label class="pill">
@@ -435,9 +434,6 @@
             <div class="card-title">ECG Waveform (last ~12s)</div>
             <div class="subtle" id="ecg-status">Disconnected</div>
             <canvas id="ecg-canvas" width="900" height="260" class="canvas"></canvas>
-            <div class="subtle">
-              Source: WebSocket <code>/ws/ecg?team=...&ff=...</code> (backend subscribes to MQTT <code>raw/ECG/&lt;team&gt;/&lt;ff&gt;</code>).
-            </div>
           </div>
 
           <div class="card">
@@ -452,7 +448,6 @@
             <div class="card-divider"></div>
 
             <div class="card-title">Polar RR/HR evaluation</div>
-            <div class="subtle">These come from your normal pipeline (Orion → Influx → API), not from ECG decoding.</div>
             <div class="mini-grid" id="polar-metrics"></div>
           </div>
         </div>

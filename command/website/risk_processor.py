@@ -24,10 +24,10 @@ from influxdb_client import InfluxDBClient
 
 
 # ----------------- ENV / CONFIG -----------------
-INFLUX_URL = os.getenv("INFLUX_URL", "http://influxdb:8086")
-INFLUX_TOKEN = os.getenv("INFLUX_TOKEN", "")
-INFLUX_ORG = os.getenv("INFLUX_ORG", "")
-INFLUX_BUCKET = os.getenv("INFLUX_BUCKET", "")
+INFLUX_URL = os.getenv("INFLUX_URL", "http://192.168.2.12:8086")
+INFLUX_TOKEN = os.getenv("INFLUX_TOKEN", "R70UIeGKZGk-A9odIdXImPVGutlsJEbrrh0qJ9b0YoOmZb_-tr0g1kju3jgnWanoj4sDbUsYKe52Rr_GOkl81Q==")
+INFLUX_ORG = os.getenv("INFLUX_ORG", "IoT")
+INFLUX_BUCKET = os.getenv("INFLUX_BUCKET", "IoT")
 
 ORION_BASE = os.getenv("ORION_BASE", "http://192.168.2.12:1026")
 ORION_UPDATE_URL = os.getenv("ORION_UPDATE_URL", f"{ORION_BASE}/v2/op/update")

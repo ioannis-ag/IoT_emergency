@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Command Center – Patras HQ</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <link rel="stylesheet" href="styles.css" />
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+</head>
+
+<body>
+  <div id="app">
+    <header class="topbar">
+      <div class="brand">
+        <div class="brand-icon"><i class="fa-solid fa-shield-heart"></i></div>
+        <div class="brand-text">
+          <div class="brand-title">SMART FIRE COMMAND</div>
+          <div class="brand-sub">Patras Sector • Team A</div>
+        </div>
+      </div>
+
+      <div class="top-right">
+        <div id="connectionStatus" class="conn">
+          <span class="dot"></span>
+          <span class="conn-text">MQTT Connecting…</span>
+        </div>
+        <div id="clock" class="clock">—</div>
+      </div>
+    </header>
+
+    <main class="content">
+      <div class="ops-grid">
+        <!-- MAP -->
+        <div class="panel map-panel">
+          <div class="panel-head">
+            <div>
+              <div class="ph-title">Sector Map</div>
+              <div class="ph-sub">
+                Centered on leader automatically
+                <span id="incidentText" style="margin-left:10px; color:#ef4444; font-weight:900;"></span>
+              </div>
+            </div>
+            <div class="actions">
+              <button class="btn ghost" id="btnRecenter">
+                <i class="fa-solid fa-location-crosshairs"></i> Recenter Leader
+              </button>
+              <button class="btn ghost" id="btnShowAll">
+                <i class="fa-solid fa-users"></i> Show Everyone
+              </button>
+            </div>
+          </div>
+          <div id="mainMap" class="map"></div>
+        </div>
+
+        <!-- UNIT BOXES -->
+        <aside class="units">
+          <div class="panel unit-card" id="card-FF_A"></div>
+          <div class="panel unit-card" id="card-FF_B"></div>
+          <div class="panel unit-card" id="card-FF_C"></div>
+          <div class="panel unit-card" id="card-FF_D"></div>
+        </aside>
+
+        <!-- ALERTS -->
+        <div class="panel alerts-panel" id="alertsPanel">
+          <div class="alerts-head" id="alertsHead">
+            <div class="ah-left">
+              <i class="fa-solid fa-triangle-exclamation"></i>
+              <span class="ah-title">MISSION ALERTS</span>
+              <span class="ah-sub" id="alertsSub">No active alerts</span>
+            </div>
+            <div class="ah-right">
+              <span class="badge ok" id="missionBadge">Nominal</span>
+            </div>
+          </div>
+
+          <div class="alerts-body" id="alertContent">
+            <div class="empty">No active alerts.</div>
+          </div>
+        </div>
+      </div>
+
+      <div id="toast" class="toast hidden"></div>
+    </main>
+  </div>
+
+  <!-- ✅ ACTION POPUP -->
+  <div id="actionPopup" class="action-popup hidden" role="dialog" aria-modal="true" aria-live="assertive">
+    <div id="actionPopupCard" class="action-popup-card">
+      <div class="action-popup-top">
+        <div id="actionPopupTitle" class="action-popup-title">ALERT</div>
+        <button id="actionPopupX" class="action-popup-x" aria-label="Close">✕</button>
+      </div>
+      <div id="actionPopupMsg" class="action-popup-msg">Message</div>
+
+      <div class="action-popup-actions">
+        <button id="actionPopupAcknowledge" class="action-popup-btn">Acknowledge</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- libs -->
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" defer></script>
+  <script src="https://unpkg.com/mqtt/dist/mqtt.min.js" defer></script>
+
+  <!-- IMPORTANT:
+       DO NOT load YouTube iframe API here. app.js will load it once. -->
+  <script src="https://cdn.jsdelivr.net/npm/hls.js@1/dist/hls.min.js" defer></script>
+  <!-- CRITICAL FIX:
+       Use absolute path so it's the same file you tested with fetch("/app.js") -->
+  <script src="/app.js?v=20260212-1" defer></script>
+</body>
+</html>
